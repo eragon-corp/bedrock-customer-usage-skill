@@ -10,6 +10,9 @@ The skill reports:
 - CloudWatch `AWS/Bedrock` metric visibility
 - Bedrock model invocation logging configuration
 
+It also includes an optional key creation workflow that creates one IAM user per
+customer access key and tags it for future cost attribution.
+
 ## Install
 
 Copy the skill folder into your Codex skills directory:
@@ -69,6 +72,41 @@ Useful options:
 bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh --hours 168 --max-pages 10 --recent 20
 ```
 
+## Create a Customer Bedrock Key
+
+Configure the operator and policy inputs:
+
+```bash
+export BEDROCK_KEY_OPERATOR_CREDENTIALS=/secure/path/operator.env
+export BEDROCK_KEY_CUSTOMER_PATH=/bedrock-customers/customer/
+export BEDROCK_KEY_OWNER=customer-owner
+export BEDROCK_KEY_PURPOSE=customer-purpose
+export BEDROCK_KEY_REGION=ap-southeast-1
+export BEDROCK_KEY_RUNTIME_POLICY_ARN=arn:aws:iam::123456789012:policy/BedrockCustomerRuntime
+export BEDROCK_KEY_BOUNDARY_POLICY_ARN=arn:aws:iam::123456789012:policy/BedrockCustomerBoundary
+```
+
+Create a key:
+
+```bash
+bedrock-customer-usage/scripts/create_bedrock_customer_key.sh \
+  --customer example-customer \
+  --key-alias prod \
+  --output-dir ./secrets
+```
+
+The script creates one IAM user and one access key, writes credentials to a
+local `0600` env file, and prints only a masked access key id.
+
+The IAM user is tagged for two-level cost attribution:
+
+- Customer-level: `customer=<customer>`
+- Key-level: `usageOwner=<customer>-<key_alias>-<timestamp>`
+
+To make these tags available in AWS billing, activate cost allocation tags such
+as `iamPrincipal/customer` and `iamPrincipal/usageOwner` after AWS discovers
+them. Billing data is delayed and applies to future costs.
+
 ## Required AWS Permissions
 
 The operator key should be scoped as narrowly as possible. At minimum it needs:
@@ -81,5 +119,15 @@ The operator key should be scoped as narrowly as possible. At minimum it needs:
 - `bedrock:GetModelInvocationLoggingConfiguration` in the target region
 
 Optional key-management flows may also need `iam:CreateAccessKey`, `iam:UpdateAccessKey`, and `iam:DeleteAccessKey` scoped to the customer IAM path.
+
+For per-key future cost attribution, require these IAM user tags during key
+creation:
+
+- `customer`
+- `usageOwner`
+- `Purpose`
+- `owner`
+- `region`
+- `budgetScope`
 
 This skill intentionally does not require `ce:GetCostAndUsage`.

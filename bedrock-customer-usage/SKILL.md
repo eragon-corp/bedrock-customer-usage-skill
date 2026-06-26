@@ -26,6 +26,7 @@ bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh --hours 168
 - Usage: CloudTrail `LookupEvents`, filtered by customer access keys and `eventSource=bedrock.amazonaws.com`.
 - Key scope: IAM users under `BEDROCK_USAGE_CUSTOMER_PATH`.
 - Diagnostics: `cloudwatch:ListMetrics` for `AWS/Bedrock` and `bedrock:GetModelInvocationLoggingConfiguration`.
+- Key creation: `scripts/create_bedrock_customer_key.sh` creates one IAM user per access key and tags it for future customer-level and key-level cost attribution.
 
 ## Credentials
 
@@ -43,6 +44,28 @@ Never print full `AWS_SECRET_ACCESS_KEY` values. Mask access key ids unless the 
 - `cloudwatch:ListMetrics` only lists metric names/dimensions; it does not return metric values.
 - If the user asks for exact customer cost by key, say that the clean path is the customer Budget tag filter plus CloudTrail usage, not raw `ce:GetCostAndUsage`.
 - The operator should be able to view only the customer Budget alert, not broad Cost Explorer data.
+
+## Create-Key Workflow
+
+Use the create-key script when asked to provision a new Bedrock customer API key:
+
+```bash
+bedrock-customer-usage/scripts/create_bedrock_customer_key.sh --customer example-customer --key-alias prod --output-dir ./secrets
+```
+
+Provide configuration with environment variables:
+
+```bash
+BEDROCK_KEY_OPERATOR_CREDENTIALS=/secure/path/operator.env
+BEDROCK_KEY_CUSTOMER_PATH=/bedrock-customers/customer/
+BEDROCK_KEY_OWNER=customer-owner
+BEDROCK_KEY_PURPOSE=customer-purpose
+BEDROCK_KEY_REGION=ap-southeast-1
+BEDROCK_KEY_RUNTIME_POLICY_ARN=arn:aws:iam::123456789012:policy/RuntimePolicy
+BEDROCK_KEY_BOUNDARY_POLICY_ARN=arn:aws:iam::123456789012:policy/BoundaryPolicy
+```
+
+Keep the invariant: one access key equals one IAM user. The script tags each IAM user with `customer` and `usageOwner`; those tags are intended for future AWS cost allocation after activation.
 
 ## Safety Boundary
 
