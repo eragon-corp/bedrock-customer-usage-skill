@@ -6,6 +6,8 @@ REGION="${BEDROCK_USAGE_AWS_REGION:-ap-southeast-1}"
 BUDGET_NAME="${BEDROCK_USAGE_BUDGET_NAME:?Set BEDROCK_USAGE_BUDGET_NAME}"
 CUSTOMER_PATH="${BEDROCK_USAGE_CUSTOMER_PATH:?Set BEDROCK_USAGE_CUSTOMER_PATH}"
 OPERATOR_CRED="${BEDROCK_USAGE_OPERATOR_CREDENTIALS:-}"
+BILLING_VIEW_ARN="${BEDROCK_USAGE_BILLING_VIEW_ARN:-}"
+COST_SERVICE="${BEDROCK_USAGE_COST_SERVICE:-Amazon Bedrock}"
 HOURS=24
 MAX_PAGES=10
 RECENT_LIMIT=10
@@ -25,6 +27,8 @@ Required:
 Optional:
   BEDROCK_USAGE_AWS_REGION
   BEDROCK_USAGE_OPERATOR_CREDENTIALS
+  BEDROCK_USAGE_BILLING_VIEW_ARN
+  BEDROCK_USAGE_COST_SERVICE
 EOF
 }
 
@@ -109,6 +113,19 @@ PY
 START_TIME=$(printf '%s' "$time_json" | jq -r '.start')
 END_TIME=$(printf '%s' "$time_json" | jq -r '.end')
 
+cost_period_json=$(python3 <<'PY'
+import datetime as dt
+import json
+
+today = dt.datetime.now(dt.timezone.utc).date()
+start = today.replace(day=1)
+end = today + dt.timedelta(days=1)
+print(json.dumps({"start": start.isoformat(), "end": end.isoformat()}))
+PY
+)
+COST_START=$(printf '%s' "$cost_period_json" | jq -r '.start')
+COST_END=$(printf '%s' "$cost_period_json" | jq -r '.end')
+
 echo "== Bedrock customer usage =="
 echo "account=$ACCOUNT_ID region=$REGION window=${HOURS}h start=$START_TIME end=$END_TIME"
 echo
@@ -159,20 +176,88 @@ printf '%s' "$users_json" | jq -r '.Users[]?.UserName' | while IFS= read -r user
   purpose=$(printf '%s' "$tags_json" | jq -r '.Tags[]? | select(.Key=="Purpose") | .Value' | head -n1)
   owner=$(printf '%s' "$tags_json" | jq -r '.Tags[]? | select(.Key=="owner") | .Value' | head -n1)
   customer=$(printf '%s' "$tags_json" | jq -r '.Tags[]? | select(.Key=="customer") | .Value' | head -n1)
+  usage_owner=$(printf '%s' "$tags_json" | jq -r '.Tags[]? | select(.Key=="usageOwner") | .Value' | head -n1)
+  key_alias=$(printf '%s' "$tags_json" | jq -r '.Tags[]? | select(.Key=="keyAlias") | .Value' | head -n1)
   keys_json=$(aws_operator iam list-access-keys --user-name "$user_name" --output json)
-  printf '%s' "$keys_json" | jq -r --arg user "$user_name" --arg purpose "$purpose" --arg owner "$owner" --arg customer "$customer" '
+  printf '%s' "$keys_json" | jq -r --arg user "$user_name" --arg purpose "$purpose" --arg owner "$owner" --arg customer "$customer" --arg usage_owner "$usage_owner" --arg key_alias "$key_alias" '
     .AccessKeyMetadata[]?
-    | [$user, .AccessKeyId, .Status, .CreateDate, $purpose, $owner, $customer]
+    | [$user, .AccessKeyId, .Status, .CreateDate, $purpose, $owner, $customer, $usage_owner, $key_alias]
     | @tsv
   ' >> "$keys_file"
 done
 
 if [[ -s "$keys_file" ]]; then
-  while IFS=$'\t' read -r user_name key_id status create_date purpose owner customer; do
-    echo "user=$user_name key=$(mask_key "$key_id") status=$status created=$create_date Purpose=${purpose:-} owner=${owner:-} customer=${customer:-}"
+  while IFS=$'\t' read -r user_name key_id status create_date purpose owner customer usage_owner key_alias; do
+    echo "user=$user_name key=$(mask_key "$key_id") status=$status created=$create_date Purpose=${purpose:-} owner=${owner:-} customer=${customer:-} usageOwner=${usage_owner:-} keyAlias=${key_alias:-}"
   done < "$keys_file"
 else
   echo "no access keys found"
+fi
+echo
+
+echo "== Scoped Cost Explorer =="
+echo "period=$COST_START..$COST_END service=$COST_SERVICE"
+if [[ -z "$BILLING_VIEW_ARN" ]]; then
+  echo "billing_view=not_configured"
+  echo "cost_detail=skipped"
+else
+  echo "billing_view=$BILLING_VIEW_ARN"
+  if view_json=$(aws_operator billing get-billing-view --region us-east-1 --arn "$BILLING_VIEW_ARN" --output json 2>/tmp/bedrock_usage_billing_view_error.txt); then
+    printf '%s' "$view_json" | jq -r '.billingView as $v | "billing_view_name=\($v.name) type=\($v.billingViewType) owner=\($v.ownerAccountId)"'
+  else
+    echo "billing_view_lookup=unavailable"
+    sed 's/^/  /' /tmp/bedrock_usage_billing_view_error.txt
+  fi
+
+  cost_filter=$(jq -nc --arg service "$COST_SERVICE" '{"Dimensions":{"Key":"SERVICE","Values":[$service]}}')
+  if total_cost_json=$(aws_operator ce get-cost-and-usage \
+      --billing-view-arn "$BILLING_VIEW_ARN" \
+      --time-period "Start=$COST_START,End=$COST_END" \
+      --granularity MONTHLY \
+      --metrics UnblendedCost UsageQuantity \
+      --filter "$cost_filter" \
+      --region us-east-1 \
+      --output json 2>/tmp/bedrock_usage_ce_total_error.txt); then
+    printf '%s' "$total_cost_json" | jq -r '
+      .ResultsByTime[0] as $r
+      | "total_unblended_cost=\($r.Total.UnblendedCost.Amount // "0") \($r.Total.UnblendedCost.Unit // "USD") estimated=\($r.Estimated)"
+    '
+  else
+    echo "total_unblended_cost=unavailable"
+    sed 's/^/  /' /tmp/bedrock_usage_ce_total_error.txt
+  fi
+
+  for tag_key in user:iamPrincipal/customer user:iamPrincipal/usageOwner; do
+    label=${tag_key##*/}
+    if grouped_cost_json=$(aws_operator ce get-cost-and-usage \
+        --billing-view-arn "$BILLING_VIEW_ARN" \
+        --time-period "Start=$COST_START,End=$COST_END" \
+        --granularity MONTHLY \
+        --metrics UnblendedCost UsageQuantity \
+        --filter "$cost_filter" \
+        --group-by "Type=TAG,Key=$tag_key" \
+        --region us-east-1 \
+        --output json 2>/tmp/bedrock_usage_ce_group_error.txt); then
+      group_count=$(printf '%s' "$grouped_cost_json" | jq '[.ResultsByTime[].Groups[]?] | length')
+      echo "by_${label}_groups=$group_count"
+      if [[ "$group_count" != "0" ]]; then
+        printf '%s' "$grouped_cost_json" | jq -r '
+          .ResultsByTime[].Groups[]?
+          | {
+              tag: ((.Keys[0] // "") | split("$") | last),
+              cost: (.Metrics.UnblendedCost.Amount // "0"),
+              unit: (.Metrics.UnblendedCost.Unit // "USD"),
+              usage: (.Metrics.UsageQuantity.Amount // "0")
+            }
+          | select(.tag != "")
+          | "  tag=\(.tag) cost=\(.cost) \(.unit) usage_quantity=\(.usage)"
+        '
+      fi
+    else
+      echo "by_${label}=unavailable"
+      sed 's/^/  /' /tmp/bedrock_usage_ce_group_error.txt
+    fi
+  done
 fi
 echo
 
@@ -180,7 +265,7 @@ echo "== CloudTrail Bedrock usage =="
 events_file="$tmp_dir/events.jsonl"
 : > "$events_file"
 
-while IFS=$'\t' read -r user_name key_id status create_date purpose owner customer; do
+while IFS=$'\t' read -r user_name key_id status create_date purpose owner customer usage_owner key_alias; do
   [[ "$status" == "Active" ]] || continue
   next_token=""
   page=0

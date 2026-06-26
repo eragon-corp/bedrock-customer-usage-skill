@@ -23,6 +23,7 @@ bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh --hours 168
 
 - Cost: AWS Budgets entry configured by `BEDROCK_USAGE_BUDGET_NAME`.
 - Cost filter: usually a customer cost allocation tag plus Bedrock service filters.
+- Scoped Cost Explorer: if `BEDROCK_USAGE_BILLING_VIEW_ARN` is set, query only that Billing View and group Bedrock cost by customer and usage-owner tags.
 - Usage: CloudTrail `LookupEvents`, filtered by customer access keys and `eventSource=bedrock.amazonaws.com`.
 - Key scope: IAM users under `BEDROCK_USAGE_CUSTOMER_PATH`.
 - Diagnostics: `cloudwatch:ListMetrics` for `AWS/Bedrock` and `bedrock:GetModelInvocationLoggingConfiguration`.
@@ -43,7 +44,8 @@ Never print full `AWS_SECRET_ACCESS_KEY` values. Mask access key ids unless the 
 - CloudTrail Event History is limited to recent events, normally up to 90 days.
 - `cloudwatch:ListMetrics` only lists metric names/dimensions; it does not return metric values.
 - If the user asks for exact customer cost by key, say that the clean path is the customer Budget tag filter plus CloudTrail usage, not raw `ce:GetCostAndUsage`.
-- The operator should be able to view only the customer Budget alert, not broad Cost Explorer data.
+- If a customer-scoped Billing View ARN is configured, the operator may query Cost Explorer through that view only.
+- The operator should be able to view only the customer Budget alert and the scoped Billing View, not broad Cost Explorer data.
 
 ## Create-Key Workflow
 
@@ -69,4 +71,10 @@ Keep the invariant: one access key equals one IAM user. The script tags each IAM
 
 ## Safety Boundary
 
-Do not add `ce:GetCostAndUsage` or broader CloudWatch Logs read permissions unless the user explicitly approves after the account-level visibility risk is explained.
+Do not add account-wide Cost Explorer or broader CloudWatch Logs read permissions unless the user explicitly approves after the account-level visibility risk is explained.
+
+Scoped Cost Explorer is acceptable only when all of these are true:
+
+- The API call includes `--billing-view-arn`.
+- The Billing View is filtered to the intended customer scope.
+- IAM permissions for `ce:GetCostAndUsage`, `ce:GetTags`, `ce:GetDimensionValues`, and `billing:GetBillingView` are scoped to that Billing View ARN.

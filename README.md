@@ -5,6 +5,7 @@ Codex skill for checking customer-scoped AWS Bedrock budget and usage.
 The skill reports:
 
 - AWS Budget status for a configured Bedrock customer budget
+- Optional scoped Cost Explorer totals through an AWS Billing View
 - IAM users and access keys under a configured customer path
 - Bedrock usage events from CloudTrail
 - CloudWatch `AWS/Bedrock` metric visibility
@@ -48,6 +49,18 @@ export BEDROCK_USAGE_AWS_REGION=ap-southeast-1
 export BEDROCK_USAGE_BUDGET_NAME='Customer Bedrock monthly budget'
 export BEDROCK_USAGE_CUSTOMER_PATH=/bedrock-customers/customer/
 ```
+
+Optional scoped Cost Explorer configuration:
+
+```bash
+export BEDROCK_USAGE_BILLING_VIEW_ARN=arn:aws:billing::123456789012:billingview/custom-...
+export BEDROCK_USAGE_COST_SERVICE='Amazon Bedrock'
+```
+
+The Billing View should be filtered to the customer scope, for example by a
+cost allocation tag such as `iamPrincipal/Purpose`. The script then queries
+only that view and groups Bedrock cost by `iamPrincipal/customer` and
+`iamPrincipal/usageOwner` when AWS has billing data for those tags.
 
 Example credential file:
 
@@ -117,6 +130,8 @@ The operator key should be scoped as narrowly as possible. At minimum it needs:
 - `cloudtrail:LookupEvents` in the target region
 - `cloudwatch:ListMetrics` in the target region
 - `bedrock:GetModelInvocationLoggingConfiguration` in the target region
+- Optional: `ce:GetCostAndUsage`, `ce:GetTags`, `ce:GetDimensionValues`, and
+  `billing:GetBillingView` scoped to the configured Billing View ARN
 
 Optional key-management flows may also need `iam:CreateAccessKey`, `iam:UpdateAccessKey`, and `iam:DeleteAccessKey` scoped to the customer IAM path.
 
@@ -130,4 +145,5 @@ creation:
 - `region`
 - `budgetScope`
 
-This skill intentionally does not require `ce:GetCostAndUsage`.
+This skill does not require broad Cost Explorer access. If Cost Explorer is
+enabled, grant it only on a customer-scoped Billing View ARN.
