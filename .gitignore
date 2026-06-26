@@ -1,0 +1,10 @@
+.DS_Store
+.env
+*.env
+*.pem
+*.key
+*.json
+!.vscode/extensions.json
+node_modules/
+dist/
+build/

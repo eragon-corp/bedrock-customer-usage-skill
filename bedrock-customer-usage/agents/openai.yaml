@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bedrock Customer Usage"
+  short_description: "Check Bedrock budget and usage"
+  default_prompt: "Use $bedrock-customer-usage to check current Bedrock customer cost and usage."
