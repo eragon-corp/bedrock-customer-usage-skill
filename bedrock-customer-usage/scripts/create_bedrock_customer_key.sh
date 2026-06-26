@@ -1,21 +1,38 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+CONFIG_FILE="${BEDROCK_CUSTOMER_USAGE_CONFIG:-}"
+
+if [[ -z "$CONFIG_FILE" ]]; then
+  for candidate in \
+    "$PWD/bedrock-customer-usage.env" \
+    "$HOME/.config/bedrock-customer-usage/config.env" \
+    "$SCRIPT_DIR/../config.env"; do
+    if [[ -f "$candidate" ]]; then
+      CONFIG_FILE="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ -n "$CONFIG_FILE" ]]; then
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "BEDROCK_CUSTOMER_USAGE_CONFIG does not exist: $CONFIG_FILE" >&2
+    exit 2
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  set +a
+fi
+
 CUSTOMER=""
 KEY_ALIAS="default"
 USER_NAME=""
 USAGE_OWNER=""
 OUTPUT_DIR="./secrets"
 VERIFY=1
-CREATED_BY="${BEDROCK_KEY_CREATED_BY:-bedrock-customer-key-manager}"
-
-CUSTOMER_PATH="${BEDROCK_KEY_CUSTOMER_PATH:?Set BEDROCK_KEY_CUSTOMER_PATH}"
-OWNER="${BEDROCK_KEY_OWNER:?Set BEDROCK_KEY_OWNER}"
-PURPOSE="${BEDROCK_KEY_PURPOSE:?Set BEDROCK_KEY_PURPOSE}"
-REGION="${BEDROCK_KEY_REGION:-ap-southeast-1}"
-RUNTIME_POLICY_ARN="${BEDROCK_KEY_RUNTIME_POLICY_ARN:?Set BEDROCK_KEY_RUNTIME_POLICY_ARN}"
-BOUNDARY_POLICY_ARN="${BEDROCK_KEY_BOUNDARY_POLICY_ARN:?Set BEDROCK_KEY_BOUNDARY_POLICY_ARN}"
-OPERATOR_CRED="${BEDROCK_KEY_OPERATOR_CREDENTIALS:-}"
 
 usage() {
   cat <<EOF
@@ -24,15 +41,16 @@ Usage: $0 --customer NAME [--key-alias NAME] [--usage-owner VALUE] [--user-name 
 Creates one IAM user and one Bedrock access key, with tags for future customer
 and per-key cost attribution.
 
-Required environment:
-  BEDROCK_KEY_CUSTOMER_PATH
-  BEDROCK_KEY_OWNER
-  BEDROCK_KEY_PURPOSE
-  BEDROCK_KEY_RUNTIME_POLICY_ARN
-  BEDROCK_KEY_BOUNDARY_POLICY_ARN
+Shared config:
+  Auto-loads ./bedrock-customer-usage.env,
+  ~/.config/bedrock-customer-usage/config.env, or bedrock-customer-usage/config.env.
+  You can also set BEDROCK_CUSTOMER_USAGE_CONFIG.
+
+Credentials:
+  Set BEDROCK_KEY_OPERATOR_CREDENTIALS, or export AWS_ACCESS_KEY_ID and
+  AWS_SECRET_ACCESS_KEY directly.
 
 Optional environment:
-  BEDROCK_KEY_OPERATOR_CREDENTIALS
   BEDROCK_KEY_REGION
   BEDROCK_KEY_CREATED_BY
 EOF
@@ -81,6 +99,15 @@ if [[ -z "$CUSTOMER" ]]; then
   usage >&2
   exit 2
 fi
+
+CREATED_BY="${BEDROCK_KEY_CREATED_BY:-bedrock-customer-key-manager}"
+CUSTOMER_PATH="${BEDROCK_KEY_CUSTOMER_PATH:?Set BEDROCK_KEY_CUSTOMER_PATH or BEDROCK_CUSTOMER_USAGE_CONFIG}"
+OWNER="${BEDROCK_KEY_OWNER:?Set BEDROCK_KEY_OWNER or BEDROCK_CUSTOMER_USAGE_CONFIG}"
+PURPOSE="${BEDROCK_KEY_PURPOSE:?Set BEDROCK_KEY_PURPOSE or BEDROCK_CUSTOMER_USAGE_CONFIG}"
+REGION="${BEDROCK_KEY_REGION:-ap-southeast-1}"
+RUNTIME_POLICY_ARN="${BEDROCK_KEY_RUNTIME_POLICY_ARN:?Set BEDROCK_KEY_RUNTIME_POLICY_ARN or BEDROCK_CUSTOMER_USAGE_CONFIG}"
+BOUNDARY_POLICY_ARN="${BEDROCK_KEY_BOUNDARY_POLICY_ARN:?Set BEDROCK_KEY_BOUNDARY_POLICY_ARN or BEDROCK_CUSTOMER_USAGE_CONFIG}"
+OPERATOR_CRED="${BEDROCK_KEY_OPERATOR_CREDENTIALS:-}"
 
 require_bin() {
   if ! command -v "$1" >/dev/null 2>&1; then

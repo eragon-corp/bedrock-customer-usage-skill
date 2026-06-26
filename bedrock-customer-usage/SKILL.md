@@ -35,6 +35,12 @@ Use the operator key for all AWS calls, including Budget, IAM key status, CloudT
 
 Set credentials in the environment or point `BEDROCK_USAGE_OPERATOR_CREDENTIALS` to a local env file.
 
+The scripts auto-load shared configuration from the first file that exists:
+
+- `./bedrock-customer-usage.env`
+- `~/.config/bedrock-customer-usage/config.env`
+- `bedrock-customer-usage/config.env`
+
 Never print full `AWS_SECRET_ACCESS_KEY` values. Mask access key ids unless the user explicitly needs an exact id for AWS lookup.
 
 ## Interpretation
@@ -55,16 +61,11 @@ Use the create-key script when asked to provision a new Bedrock customer API key
 bedrock-customer-usage/scripts/create_bedrock_customer_key.sh --customer example-customer --key-alias prod --output-dir ./secrets
 ```
 
-Provide configuration with environment variables:
+Shared path, policy, budget, and Billing View settings should come from the local config file. For daily use, provide only credentials and the customer arguments:
 
 ```bash
 BEDROCK_KEY_OPERATOR_CREDENTIALS=/secure/path/operator.env
-BEDROCK_KEY_CUSTOMER_PATH=/bedrock-customers/customer/
-BEDROCK_KEY_OWNER=customer-owner
-BEDROCK_KEY_PURPOSE=customer-purpose
-BEDROCK_KEY_REGION=ap-southeast-1
-BEDROCK_KEY_RUNTIME_POLICY_ARN=arn:aws:iam::123456789012:policy/RuntimePolicy
-BEDROCK_KEY_BOUNDARY_POLICY_ARN=arn:aws:iam::123456789012:policy/BoundaryPolicy
+bedrock-customer-usage/scripts/create_bedrock_customer_key.sh --customer example-customer --key-alias prod --output-dir ./secrets
 ```
 
 Keep the invariant: one access key equals one IAM user. The script tags each IAM user with `customer` and `usageOwner`; those tags are intended for future AWS cost allocation after activation.

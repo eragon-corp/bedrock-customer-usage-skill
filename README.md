@@ -21,25 +21,19 @@ cp -R bedrock-customer-usage ~/.codex/skills/
 
 Restart Codex if it does not appear right away.
 
-## Configure Usage Checks
+## Set Up Once
 
-Set the customer account, budget, IAM path, and operator credentials:
-
-```bash
-export BEDROCK_USAGE_AWS_ACCOUNT_ID=123456789012
-export BEDROCK_USAGE_AWS_REGION=ap-southeast-1
-export BEDROCK_USAGE_BUDGET_NAME='Customer Bedrock monthly budget'
-export BEDROCK_USAGE_CUSTOMER_PATH=/bedrock-customers/customer/
-export BEDROCK_USAGE_OPERATOR_CREDENTIALS=/secure/path/operator.env
-```
-
-If you have a scoped Billing View, add it to show Cost Explorer totals:
+Create a local config file for the customer scope:
 
 ```bash
-export BEDROCK_USAGE_BILLING_VIEW_ARN=arn:aws:billing::123456789012:billingview/custom-...
+mkdir -p ~/.config/bedrock-customer-usage
+cp bedrock-customer-usage/config.example.env ~/.config/bedrock-customer-usage/config.env
 ```
 
-The operator credential file should look like this:
+Edit the copied file once with your account, budget, IAM path, policy ARNs, and
+optional Billing View ARN. The scripts auto-load this file.
+
+Put the operator AWS credential in a separate private env file:
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
@@ -51,6 +45,12 @@ export AWS_DEFAULT_REGION=ap-southeast-1
 Do not commit real credentials.
 
 ## Check Usage
+
+Point the script at the operator credential file:
+
+```bash
+export BEDROCK_USAGE_OPERATOR_CREDENTIALS=/secure/path/operator.env
+```
 
 Run a 24-hour usage check:
 
@@ -74,16 +74,17 @@ The output includes:
 
 ## Create a Customer Key
 
-Set the operator and policy inputs:
+For daily use, you only need the operator credential and the customer key name.
 
 ```bash
 export BEDROCK_KEY_OPERATOR_CREDENTIALS=/secure/path/operator.env
-export BEDROCK_KEY_CUSTOMER_PATH=/bedrock-customers/customer/
-export BEDROCK_KEY_OWNER=customer-owner
-export BEDROCK_KEY_PURPOSE=customer-purpose
-export BEDROCK_KEY_REGION=ap-southeast-1
-export BEDROCK_KEY_RUNTIME_POLICY_ARN=arn:aws:iam::123456789012:policy/BedrockCustomerRuntime
-export BEDROCK_KEY_BOUNDARY_POLICY_ARN=arn:aws:iam::123456789012:policy/BedrockCustomerBoundary
+```
+
+Or export the two AWS credential values directly:
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
 ```
 
 Create one key:

@@ -1,6 +1,7 @@
 .DS_Store
 .env
 *.env
+!bedrock-customer-usage/config.example.env
 *.pem
 *.key
 *.json

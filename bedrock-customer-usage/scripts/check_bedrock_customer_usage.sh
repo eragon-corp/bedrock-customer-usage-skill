@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ACCOUNT_ID="${BEDROCK_USAGE_AWS_ACCOUNT_ID:?Set BEDROCK_USAGE_AWS_ACCOUNT_ID}"
-REGION="${BEDROCK_USAGE_AWS_REGION:-ap-southeast-1}"
-BUDGET_NAME="${BEDROCK_USAGE_BUDGET_NAME:?Set BEDROCK_USAGE_BUDGET_NAME}"
-CUSTOMER_PATH="${BEDROCK_USAGE_CUSTOMER_PATH:?Set BEDROCK_USAGE_CUSTOMER_PATH}"
-OPERATOR_CRED="${BEDROCK_USAGE_OPERATOR_CREDENTIALS:-}"
-BILLING_VIEW_ARN="${BEDROCK_USAGE_BILLING_VIEW_ARN:-}"
-COST_SERVICE="${BEDROCK_USAGE_COST_SERVICE:-Amazon Bedrock}"
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+CONFIG_FILE="${BEDROCK_CUSTOMER_USAGE_CONFIG:-}"
+
+if [[ -z "$CONFIG_FILE" ]]; then
+  for candidate in \
+    "$PWD/bedrock-customer-usage.env" \
+    "$HOME/.config/bedrock-customer-usage/config.env" \
+    "$SCRIPT_DIR/../config.env"; do
+    if [[ -f "$candidate" ]]; then
+      CONFIG_FILE="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ -n "$CONFIG_FILE" ]]; then
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo "BEDROCK_CUSTOMER_USAGE_CONFIG does not exist: $CONFIG_FILE" >&2
+    exit 2
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  set +a
+fi
+
 HOURS=24
 MAX_PAGES=10
 RECENT_LIMIT=10
@@ -19,15 +38,16 @@ Usage: $0 [--hours N] [--max-pages N] [--recent N]
 Checks customer-scoped Bedrock budget cost, customer key status, CloudTrail Bedrock usage,
 CloudWatch metric visibility, and Bedrock invocation logging config.
 
-Required:
-  BEDROCK_USAGE_AWS_ACCOUNT_ID
-  BEDROCK_USAGE_BUDGET_NAME
-  BEDROCK_USAGE_CUSTOMER_PATH
+Shared config:
+  Auto-loads ./bedrock-customer-usage.env,
+  ~/.config/bedrock-customer-usage/config.env, or bedrock-customer-usage/config.env.
+  You can also set BEDROCK_CUSTOMER_USAGE_CONFIG.
+
+Credentials:
+  Set BEDROCK_USAGE_OPERATOR_CREDENTIALS, or export AWS_ACCESS_KEY_ID and
+  AWS_SECRET_ACCESS_KEY directly.
 
 Optional:
-  BEDROCK_USAGE_AWS_REGION
-  BEDROCK_USAGE_OPERATOR_CREDENTIALS
-  BEDROCK_USAGE_BILLING_VIEW_ARN
   BEDROCK_USAGE_COST_SERVICE
 EOF
 }
@@ -57,6 +77,14 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+ACCOUNT_ID="${BEDROCK_USAGE_AWS_ACCOUNT_ID:?Set BEDROCK_USAGE_AWS_ACCOUNT_ID or BEDROCK_CUSTOMER_USAGE_CONFIG}"
+REGION="${BEDROCK_USAGE_AWS_REGION:-ap-southeast-1}"
+BUDGET_NAME="${BEDROCK_USAGE_BUDGET_NAME:?Set BEDROCK_USAGE_BUDGET_NAME or BEDROCK_CUSTOMER_USAGE_CONFIG}"
+CUSTOMER_PATH="${BEDROCK_USAGE_CUSTOMER_PATH:?Set BEDROCK_USAGE_CUSTOMER_PATH or BEDROCK_CUSTOMER_USAGE_CONFIG}"
+OPERATOR_CRED="${BEDROCK_USAGE_OPERATOR_CREDENTIALS:-}"
+BILLING_VIEW_ARN="${BEDROCK_USAGE_BILLING_VIEW_ARN:-}"
+COST_SERVICE="${BEDROCK_USAGE_COST_SERVICE:-Amazon Bedrock}"
 
 require_bin() {
   if ! command -v "$1" >/dev/null 2>&1; then
