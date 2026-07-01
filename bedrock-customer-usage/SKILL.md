@@ -25,6 +25,7 @@ bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh --hours 168
 - Cost filter: usually a customer cost allocation tag plus Bedrock service filters.
 - Scoped Cost Explorer: if `BEDROCK_USAGE_BILLING_VIEW_ARN` is set, query only that Billing View and group Bedrock cost by customer and usage-owner tags.
 - Usage: CloudTrail `LookupEvents`, filtered by customer access keys and `eventSource=bedrock.amazonaws.com`.
+- Token usage: optional CloudWatch Logs Insights aggregation over Bedrock model invocation logs when `BEDROCK_USAGE_INVOCATION_LOG_GROUP` is configured.
 - Key scope: IAM users under `BEDROCK_USAGE_CUSTOMER_PATH`.
 - Diagnostics: `cloudwatch:ListMetrics`, `cloudwatch:GetMetricData` for returned `AWS/Bedrock` metrics, and `bedrock:GetModelInvocationLoggingConfiguration`.
 - Key creation: `scripts/create_bedrock_customer_key.sh` creates one IAM user per access key and tags it for future customer-level and key-level cost attribution.
@@ -48,7 +49,7 @@ Never print full `AWS_SECRET_ACCESS_KEY` values. Mask access key ids unless the 
 Minimum create-key permissions for the default inline-policy path are:
 `iam:CreateUser`, `iam:TagUser`, `iam:PutUserPolicy`, `iam:CreateAccessKey`, `iam:UpdateAccessKey`, `iam:DeleteAccessKey`, `iam:GetUser`, `iam:ListUsers`, `iam:ListAccessKeys`, and `iam:ListUserTags`, scoped to the configured customer path.
 
-Usage checks need only the read-only services that are enabled in the account: Budget read, CloudTrail lookup, CloudWatch metric list/data, and Bedrock logging config. Raw CloudWatch Logs or S3 invocation logs are not part of the default path.
+Usage checks need only the read-only services that are enabled in the account: Budget read, CloudTrail lookup, CloudWatch metric list/data, and Bedrock logging config. CloudWatch Logs token usage aggregation is optional and must be scoped to the Bedrock invocation log group. Raw prompt/response logs should not be printed.
 
 ## Interpretation
 
@@ -56,6 +57,7 @@ Usage checks need only the read-only services that are enabled in the account: B
 - CloudTrail usage is closer to activity tracking, but still not a token or dollar cost meter.
 - CloudTrail Event History is limited to recent events, normally up to 90 days.
 - `cloudwatch:ListMetrics` only lists metric names/dimensions; it does not return metric values.
+- `Invocation log token usage` is near-real-time token accounting from model invocation logs. It is still not invoice-accurate cost.
 - If the user asks for exact customer cost by key, say that the clean path is the customer Budget tag filter plus CloudTrail usage, not raw `ce:GetCostAndUsage`.
 - If a customer-scoped Billing View ARN is configured, the operator may query Cost Explorer through that view only.
 - The operator should be able to view only the customer Budget alert and the scoped Billing View, not broad Cost Explorer data.
@@ -101,6 +103,7 @@ Read these output sections:
 
 - `Customer keys`: IAM users under `BEDROCK_USAGE_CUSTOMER_PATH`, masked access key ids, active/inactive status, creation date, and attribution tags.
 - `CloudTrail Bedrock usage`: Bedrock events grouped by access key and model id, plus recent event names and error codes.
+- `Invocation log token usage`: aggregate calls and token counts grouped by IAM principal, model id, and request metadata. This section appears only when `BEDROCK_USAGE_INVOCATION_LOG_GROUP` or `--invocation-log-group` is set.
 - `CloudWatch and Bedrock logging diagnostics`: whether account-level Bedrock metrics and invocation logging config are visible.
 
 For exact language to the user:
@@ -110,6 +113,17 @@ Usage here means recent Bedrock API activity from CloudTrail, grouped by custome
 ```
 
 Token-level usage by IAM user/key/model requires Bedrock invocation logging and scoped read access to the log destination. Raw CloudWatch Logs or S3 read access is not part of the default workflow because it may expose prompt/response data.
+
+If invocation logs are enabled, run:
+
+```bash
+BEDROCK_USAGE_OPERATOR_CREDENTIALS=/secure/path/operator.env \
+bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh --hours 24 --invocation-log-group /aws/bedrock/model-invocations
+```
+
+The script filters results to principals under `BEDROCK_USAGE_CUSTOMER_PATH` and prints only aggregate token counts. Do not paste raw invocation log events into replies unless the user explicitly requests it and understands they may contain prompt/response data.
+
+When callers use the Converse API, ask them to include stable `requestMetadata` such as `customer`, `usageOwner`, and `keyAlias`. If calls omit metadata, the script still groups by IAM principal ARN, which works with the one-key-per-IAM-user model.
 
 ## Create-Key Workflow
 

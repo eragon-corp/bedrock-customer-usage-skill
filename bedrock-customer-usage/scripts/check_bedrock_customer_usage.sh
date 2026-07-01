@@ -30,13 +30,17 @@ fi
 HOURS=24
 MAX_PAGES=10
 RECENT_LIMIT=10
+INVOCATION_LOG_GROUP="${BEDROCK_USAGE_INVOCATION_LOG_GROUP:-}"
+INVOCATION_LOG_LIMIT="${BEDROCK_USAGE_INVOCATION_LOG_LIMIT:-100}"
+INVOCATION_LOG_QUERY_TIMEOUT_SECONDS="${BEDROCK_USAGE_INVOCATION_LOG_QUERY_TIMEOUT_SECONDS:-60}"
 
 usage() {
   cat <<EOF
-Usage: $0 [--hours N] [--max-pages N] [--recent N]
+Usage: $0 [--hours N] [--max-pages N] [--recent N] [--invocation-log-group NAME]
 
 Checks customer-scoped Bedrock budget cost, customer key status, CloudTrail Bedrock usage,
-CloudWatch metric visibility/data, and Bedrock invocation logging config.
+CloudWatch metric visibility/data, Bedrock invocation logging config, and optional
+invocation-log token usage.
 
 Shared config:
   Auto-loads ./bedrock-customer-usage.env,
@@ -49,6 +53,9 @@ Credentials:
 
 Optional:
   BEDROCK_USAGE_COST_SERVICE
+  BEDROCK_USAGE_INVOCATION_LOG_GROUP
+  BEDROCK_USAGE_INVOCATION_LOG_LIMIT
+  BEDROCK_USAGE_INVOCATION_LOG_QUERY_TIMEOUT_SECONDS
 EOF
 }
 
@@ -64,6 +71,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --recent)
       RECENT_LIMIT="$2"
+      shift 2
+      ;;
+    --invocation-log-group)
+      INVOCATION_LOG_GROUP="$2"
       shift 2
       ;;
     -h|--help)
@@ -117,10 +128,10 @@ aws_operator() {
       # shellcheck disable=SC1090
       source "$OPERATOR_CRED"
       set +a
-      aws "$@"
+      AWS_PAGER="" aws "$@"
     )
   else
-    aws "$@"
+    AWS_PAGER="" aws "$@"
   fi
 }
 
@@ -135,11 +146,15 @@ start = end - dt.timedelta(hours=hours)
 print(json.dumps({
     "start": start.isoformat(timespec="seconds").replace("+00:00", "Z"),
     "end": end.isoformat(timespec="seconds").replace("+00:00", "Z"),
+    "start_epoch": int(start.timestamp()),
+    "end_epoch": int(end.timestamp()),
 }))
 PY
 )
 START_TIME=$(printf '%s' "$time_json" | jq -r '.start')
 END_TIME=$(printf '%s' "$time_json" | jq -r '.end')
+START_EPOCH=$(printf '%s' "$time_json" | jq -r '.start_epoch')
+END_EPOCH=$(printf '%s' "$time_json" | jq -r '.end_epoch')
 
 cost_period_json=$(python3 <<'PY'
 import datetime as dt
@@ -433,4 +448,124 @@ if logging_json=$(aws_operator bedrock get-model-invocation-logging-configuratio
 else
   echo "bedrock_invocation_logging=unavailable"
   sed 's/^/  /' /tmp/bedrock_usage_logging_error.txt
+fi
+echo
+
+echo "== Invocation log token usage =="
+echo "window=${HOURS}h start=$START_TIME end=$END_TIME"
+if [[ -z "$INVOCATION_LOG_GROUP" ]]; then
+  echo "invocation_log_group=not_configured"
+  echo "token_usage=skipped"
+  echo "hint=set BEDROCK_USAGE_INVOCATION_LOG_GROUP or pass --invocation-log-group to aggregate token counts from CloudWatch Logs"
+else
+  echo "invocation_log_group=$INVOCATION_LOG_GROUP"
+  query_file="$tmp_dir/invocation-log-query.txt"
+  invocation_rows_file="$tmp_dir/invocation-log-token-rows.jsonl"
+  : > "$invocation_rows_file"
+  cat > "$query_file" <<QUERY
+fields identity.arn as principal,
+       modelId,
+       operation,
+       requestMetadata.customer as customer,
+       requestMetadata.usageOwner as usageOwner,
+       requestMetadata.keyAlias as keyAlias,
+       input.inputTokenCount as inputTokens,
+       output.outputTokenCount as outputTokens,
+       input.cacheReadInputTokenCount as cacheReadTokens,
+       input.cacheWriteInputTokenCount as cacheWriteTokens
+| stats count(*) as calls,
+        sum(inputTokens) as inputTokens,
+        sum(outputTokens) as outputTokens,
+        sum(cacheReadTokens) as cacheReadTokens,
+        sum(cacheWriteTokens) as cacheWriteTokens
+        by principal, customer, usageOwner, keyAlias, modelId
+| sort calls desc
+| limit $INVOCATION_LOG_LIMIT
+QUERY
+
+  log_group_args=(--log-group-name "$INVOCATION_LOG_GROUP")
+  if [[ "$INVOCATION_LOG_GROUP" == arn:* ]]; then
+    log_group_args=(--log-group-identifiers "$INVOCATION_LOG_GROUP")
+  fi
+
+  if query_json=$(aws_operator logs start-query \
+      "${log_group_args[@]}" \
+      --start-time "$START_EPOCH" \
+      --end-time "$END_EPOCH" \
+      --query-string "$(cat "$query_file")" \
+      --output json 2>/tmp/bedrock_usage_invocation_logs_error.txt); then
+    query_id=$(printf '%s' "$query_json" | jq -r '.queryId')
+    echo "query_id=$query_id"
+    query_status="Unknown"
+    query_results_json=""
+    deadline=$((SECONDS + INVOCATION_LOG_QUERY_TIMEOUT_SECONDS))
+    while [[ "$SECONDS" -le "$deadline" ]]; do
+      query_results_json=$(aws_operator logs get-query-results --query-id "$query_id" --output json 2>/tmp/bedrock_usage_invocation_logs_error.txt)
+      query_status=$(printf '%s' "$query_results_json" | jq -r '.status')
+      case "$query_status" in
+        Complete)
+          break
+          ;;
+        Failed|Cancelled|Timeout)
+          break
+          ;;
+      esac
+      sleep 2
+    done
+
+    echo "query_status=$query_status"
+    if [[ "$query_status" == "Complete" ]]; then
+      principal_prefix=":user$CUSTOMER_PATH"
+      printf '%s' "$query_results_json" | jq -c --arg prefix "$principal_prefix" '
+        .results[]?
+        | map({key: .field, value: .value}) | from_entries
+        | select((.principal // "") | contains($prefix))
+      ' > "$invocation_rows_file"
+
+      scoped_row_count=$(wc -l < "$invocation_rows_file" | tr -d ' ')
+      raw_row_count=$(printf '%s' "$query_results_json" | jq '(.results // []) | length')
+      echo "raw_groups=$raw_row_count scoped_groups=$scoped_row_count"
+
+      if [[ "$scoped_row_count" != "0" ]]; then
+        jq -sr '
+          def n($v): (($v // "0") | tonumber? // 0);
+          {
+            calls: (map(n(.calls)) | add // 0),
+            input: (map(n(.inputTokens)) | add // 0),
+            output: (map(n(.outputTokens)) | add // 0),
+            cacheRead: (map(n(.cacheReadTokens)) | add // 0),
+            cacheWrite: (map(n(.cacheWriteTokens)) | add // 0)
+          }
+          | "total_calls=\(.calls) input_tokens=\(.input) output_tokens=\(.output) cache_read_tokens=\(.cacheRead) cache_write_tokens=\(.cacheWrite)"
+        ' "$invocation_rows_file"
+        echo "by_principal_model="
+        jq -sr '
+          def n($v): (($v // "0") | tonumber? // 0);
+          def clean($v): if ($v == null or $v == "") then "-" else $v end;
+          sort_by(-(n(.calls)))
+          | .[]
+          | {
+              principal: ((.principal // "") | split("/") | last),
+              customer: clean(.customer),
+              usageOwner: clean(.usageOwner),
+              keyAlias: clean(.keyAlias),
+              modelId: clean(.modelId),
+              calls: n(.calls),
+              input: n(.inputTokens),
+              output: n(.outputTokens),
+              cacheRead: n(.cacheReadTokens),
+              cacheWrite: n(.cacheWriteTokens)
+            }
+          | "  user=\(.principal) customer=\(.customer) usageOwner=\(.usageOwner) keyAlias=\(.keyAlias) model=\(.modelId) calls=\(.calls) input=\(.input) output=\(.output) cacheRead=\(.cacheRead) cacheWrite=\(.cacheWrite)"
+        ' "$invocation_rows_file"
+      else
+        echo "token_usage=none_for_customer_path"
+      fi
+    else
+      echo "token_usage=unavailable"
+    fi
+  else
+    echo "token_usage=unavailable"
+    sed 's/^/  /' /tmp/bedrock_usage_invocation_logs_error.txt
+  fi
 fi

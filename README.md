@@ -10,6 +10,8 @@ It helps you:
 - Check the customer Bedrock budget.
 - See customer IAM users and access keys.
 - Review recent Bedrock activity from CloudTrail.
+- Aggregate token counts from Bedrock invocation logs when a CloudWatch Logs
+  destination is configured.
 - Show scoped Cost Explorer totals when a Billing View is configured.
 - Create a new Bedrock access key with customer and key-level tags.
 - Smoke-test the operator key end to end.
@@ -77,6 +79,14 @@ cloudwatch:GetMetricData
 bedrock:GetModelInvocationLoggingConfiguration
 ```
 
+For optional token usage from Bedrock model invocation logs, add read-only access
+to the specific CloudWatch log group:
+
+```text
+logs:StartQuery
+logs:GetQueryResults
+```
+
 If you use Cost Explorer, prefer a customer-scoped Billing View and grant Cost
 Explorer access only through that view.
 
@@ -107,6 +117,18 @@ The output includes:
 - Scoped monthly Cost Explorer total, if configured.
 - Recent Bedrock calls grouped by key and model.
 - Basic CloudWatch metric and Bedrock logging visibility checks.
+- Aggregate token usage from invocation logs, if `BEDROCK_USAGE_INVOCATION_LOG_GROUP`
+  is configured.
+
+To enable token usage aggregation, set the CloudWatch Logs destination:
+
+```bash
+export BEDROCK_USAGE_INVOCATION_LOG_GROUP=/aws/bedrock/model-invocations
+```
+
+The script uses CloudWatch Logs Insights and prints only aggregate calls, model
+ids, principal names, request metadata, and token counts. It does not print raw
+prompts or responses.
 
 ## Create a Customer Key
 

@@ -105,6 +105,18 @@ Example operator policy:
       "Resource": "*"
     },
     {
+      "Sid": "StartBedrockInvocationLogTokenQuery",
+      "Effect": "Allow",
+      "Action": "logs:StartQuery",
+      "Resource": "arn:aws:logs:<region>:<account-id>:log-group:<bedrock-invocation-log-group>:*"
+    },
+    {
+      "Sid": "ReadBedrockInvocationLogTokenQueryResults",
+      "Effect": "Allow",
+      "Action": "logs:GetQueryResults",
+      "Resource": "*"
+    },
+    {
       "Sid": "ReadBudgetStatus",
       "Effect": "Allow",
       "Action": [
@@ -213,6 +225,7 @@ export BEDROCK_USAGE_AWS_REGION=ap-southeast-1
 export BEDROCK_USAGE_BUDGET_NAME='Customer Bedrock monthly budget'
 export BEDROCK_USAGE_CUSTOMER_PATH=/bedrock-customers/customer/
 export BEDROCK_USAGE_BILLING_VIEW_ARN=arn:aws:billing::123456789012:billingview/custom-...
+export BEDROCK_USAGE_INVOCATION_LOG_GROUP=/aws/bedrock/model-invocations
 
 export BEDROCK_KEY_CUSTOMER_PATH=/bedrock-customers/customer/
 export BEDROCK_KEY_OWNER=customer-owner
@@ -432,6 +445,7 @@ Which keys recently called Bedrock?
 Which model ids were called?
 Were there Bedrock errors?
 Are CloudWatch Bedrock metrics and invocation logging visible?
+If configured, how many input/output/cache tokens were logged?
 ```
 
 Run a short CloudTrail window:
@@ -467,6 +481,14 @@ recent=
 cloudwatch_list_metrics=<ok|unavailable> count=<count>
 cloudwatch_get_metric_data=<ok|unavailable|skipped>
 bedrock_invocation_logging=<ok|unavailable>
+
+== Invocation log token usage ==
+invocation_log_group=<log-group-name>
+query_status=Complete
+raw_groups=<number> scoped_groups=<number>
+total_calls=<number> input_tokens=<number> output_tokens=<number> cache_read_tokens=<number> cache_write_tokens=<number>
+by_principal_model=
+  user=<iam-user> customer=<metadata-or-> usageOwner=<metadata-or-> keyAlias=<metadata-or-> model=<model-id> calls=<number> input=<number> output=<number> cacheRead=<number> cacheWrite=<number>
 ```
 
 Important usage limitations:
@@ -475,8 +497,12 @@ Important usage limitations:
 - CloudTrail Event History is limited and normally covers recent events only.
 - CloudTrail tells you calls, models, and errors; it is not an exact cost meter.
 - CloudWatch metrics are account/model-level signals, not guaranteed per key.
-- Exact token-level usage by IAM user/key/model requires Bedrock invocation
-  logging and scoped read access to the chosen log destination.
+- Invocation log token usage is near-real-time token accounting, not invoice
+  cost. It requires Bedrock model invocation logging and scoped read access to
+  the chosen log destination.
+- The script filters CloudWatch Logs Insights results to principals under
+  `BEDROCK_USAGE_CUSTOMER_PATH` and prints aggregates only, not prompt/response
+  bodies.
 
 Direct AWS CLI checks for administrators:
 
@@ -504,6 +530,45 @@ aws cloudwatch list-metrics \
 aws bedrock get-model-invocation-logging-configuration \
   --region ap-southeast-1
 ```
+
+Token usage from CloudWatch Logs invocation logs:
+
+```bash
+bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh \
+  --hours 24 \
+  --invocation-log-group /aws/bedrock/model-invocations
+```
+
+When callers use the Converse API, include stable request metadata so token
+usage can be grouped by customer and key alias:
+
+```json
+{
+  "modelId": "anthropic.claude-3-haiku-20240307-v1:0",
+  "requestMetadata": {
+    "customer": "example-customer",
+    "usageOwner": "example-customer-prod-20260701T000000Z",
+    "keyAlias": "prod"
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {
+          "text": "Reply with ok."
+        }
+      ]
+    }
+  ],
+  "inferenceConfig": {
+    "maxTokens": 4
+  }
+}
+```
+
+If calls omit request metadata, the invocation log query still groups by
+`identity.arn`. This remains useful when each customer key maps to exactly one
+IAM user.
 
 ## Disable a Customer Key
 
@@ -535,12 +600,13 @@ counts depending on configuration.
 If logs are stored in CloudWatch Logs, grant only the specific log group:
 
 ```text
-logs:DescribeLogGroups
-logs:DescribeLogStreams
-logs:FilterLogEvents
 logs:StartQuery
 logs:GetQueryResults
 ```
+
+The usage script uses Logs Insights aggregate queries and does not print raw log
+events. Avoid `logs:FilterLogEvents` unless a human has explicitly accepted the
+risk of exposing prompt/response data.
 
 If logs are stored in S3, grant only the Bedrock invocation log bucket/prefix:
 
