@@ -3,6 +3,8 @@
 Use this skill to manage customer-scoped AWS Bedrock access keys and check their
 usage from Codex.
 
+For the AWS-side setup and operating procedure, see [AWS_RUNBOOK.md](AWS_RUNBOOK.md).
+
 It helps you:
 
 - Check the customer Bedrock budget.
