@@ -36,7 +36,7 @@ usage() {
 Usage: $0 [--hours N] [--max-pages N] [--recent N]
 
 Checks customer-scoped Bedrock budget cost, customer key status, CloudTrail Bedrock usage,
-CloudWatch metric visibility, and Bedrock invocation logging config.
+CloudWatch metric visibility/data, and Bedrock invocation logging config.
 
 Shared config:
   Auto-loads ./bedrock-customer-usage.env,
@@ -374,6 +374,54 @@ if metrics_json=$(aws_operator cloudwatch list-metrics --region "$REGION" --name
   metrics_count=$(printf '%s' "$metrics_json" | jq '(.Metrics // []) | length')
   echo "cloudwatch_list_metrics=ok count=$metrics_count"
   printf '%s' "$metrics_json" | jq -r '(.Metrics // [])[:10][] | "  metric=\(.MetricName) dimensions=\(.Dimensions | map(.Name + "=" + .Value) | join(","))"'
+
+  if [[ "$metrics_count" != "0" ]]; then
+    metric_queries=$(printf '%s' "$metrics_json" | jq -c --argjson period 3600 '
+      (.Metrics // [])[:5]
+      | to_entries
+      | map({
+          Id: ("m" + (.key | tostring)),
+          Label: (
+            .value.MetricName
+            + " "
+            + ((.value.Dimensions // []) | map(.Name + "=" + .Value) | join(","))
+          ),
+          MetricStat: {
+            Metric: {
+              Namespace: "AWS/Bedrock",
+              MetricName: .value.MetricName,
+              Dimensions: (.value.Dimensions // [])
+            },
+            Period: $period,
+            Stat: "Sum"
+          },
+          ReturnData: true
+        })
+    ')
+    if metric_data_json=$(aws_operator cloudwatch get-metric-data \
+        --region "$REGION" \
+        --start-time "$START_TIME" \
+        --end-time "$END_TIME" \
+        --metric-data-queries "$metric_queries" \
+        --output json 2>/tmp/bedrock_usage_metric_data_error.txt); then
+      echo "cloudwatch_get_metric_data=ok"
+      printf '%s' "$metric_data_json" | jq -r '
+        (.MetricDataResults // [])[]
+        | {
+            label: .Label,
+            points: ((.Values // []) | length),
+            sum: ((.Values // []) | add // 0),
+            latest: ((.Values // [])[0] // "none")
+          }
+        | "  metric=\(.label) points=\(.points) sum=\(.sum) latest=\(.latest)"
+      '
+    else
+      echo "cloudwatch_get_metric_data=unavailable"
+      sed 's/^/  /' /tmp/bedrock_usage_metric_data_error.txt
+    fi
+  else
+    echo "cloudwatch_get_metric_data=skipped no_metrics"
+  fi
 else
   echo "cloudwatch_list_metrics=unavailable"
   sed 's/^/  /' /tmp/bedrock_usage_metrics_error.txt

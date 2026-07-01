@@ -33,10 +33,12 @@ USER_NAME=""
 USAGE_OWNER=""
 OUTPUT_DIR="./secrets"
 VERIFY=1
+VERIFY_INVOKE=1
+VERIFY_MODEL_ID="${BEDROCK_KEY_VERIFY_MODEL_ID:-anthropic.claude-3-haiku-20240307-v1:0}"
 
 usage() {
   cat <<EOF
-Usage: $0 --customer NAME [--key-alias NAME] [--usage-owner VALUE] [--user-name NAME] [--output-dir DIR] [--no-verify]
+Usage: $0 --customer NAME [--key-alias NAME] [--usage-owner VALUE] [--user-name NAME] [--output-dir DIR] [--verify-model MODEL_ID] [--no-verify] [--no-verify-invoke]
 
 Creates one IAM user and one Bedrock access key, with tags for future customer
 and per-key cost attribution.
@@ -53,6 +55,11 @@ Credentials:
 Optional environment:
   BEDROCK_KEY_REGION
   BEDROCK_KEY_CREATED_BY
+  BEDROCK_KEY_RUNTIME_POLICY_JSON      path to a custom inline policy JSON file
+  BEDROCK_KEY_INLINE_POLICY_NAME       default: BedrockCustomerRuntime
+  BEDROCK_KEY_RUNTIME_POLICY_ARN       optional managed policy to attach instead of inline policy
+  BEDROCK_KEY_BOUNDARY_POLICY_ARN      optional permissions boundary
+  BEDROCK_KEY_VERIFY_MODEL_ID          default: anthropic.claude-3-haiku-20240307-v1:0
 EOF
 }
 
@@ -78,8 +85,16 @@ while [[ $# -gt 0 ]]; do
       OUTPUT_DIR="$2"
       shift 2
       ;;
+    --verify-model)
+      VERIFY_MODEL_ID="$2"
+      shift 2
+      ;;
     --no-verify)
       VERIFY=0
+      shift
+      ;;
+    --no-verify-invoke)
+      VERIFY_INVOKE=0
       shift
       ;;
     -h|--help)
@@ -105,8 +120,10 @@ CUSTOMER_PATH="${BEDROCK_KEY_CUSTOMER_PATH:?Set BEDROCK_KEY_CUSTOMER_PATH or BED
 OWNER="${BEDROCK_KEY_OWNER:?Set BEDROCK_KEY_OWNER or BEDROCK_CUSTOMER_USAGE_CONFIG}"
 PURPOSE="${BEDROCK_KEY_PURPOSE:?Set BEDROCK_KEY_PURPOSE or BEDROCK_CUSTOMER_USAGE_CONFIG}"
 REGION="${BEDROCK_KEY_REGION:-ap-southeast-1}"
-RUNTIME_POLICY_ARN="${BEDROCK_KEY_RUNTIME_POLICY_ARN:?Set BEDROCK_KEY_RUNTIME_POLICY_ARN or BEDROCK_CUSTOMER_USAGE_CONFIG}"
-BOUNDARY_POLICY_ARN="${BEDROCK_KEY_BOUNDARY_POLICY_ARN:?Set BEDROCK_KEY_BOUNDARY_POLICY_ARN or BEDROCK_CUSTOMER_USAGE_CONFIG}"
+RUNTIME_POLICY_ARN="${BEDROCK_KEY_RUNTIME_POLICY_ARN:-}"
+BOUNDARY_POLICY_ARN="${BEDROCK_KEY_BOUNDARY_POLICY_ARN:-}"
+RUNTIME_POLICY_JSON="${BEDROCK_KEY_RUNTIME_POLICY_JSON:-}"
+INLINE_POLICY_NAME="${BEDROCK_KEY_INLINE_POLICY_NAME:-BedrockCustomerRuntime}"
 OPERATOR_CRED="${BEDROCK_KEY_OPERATOR_CREDENTIALS:-}"
 
 require_bin() {
@@ -152,10 +169,10 @@ aws_operator() {
       # shellcheck disable=SC1090
       source "$OPERATOR_CRED"
       set +a
-      aws "$@"
+      AWS_PAGER="" aws "$@"
     )
   else
-    aws "$@"
+    AWS_PAGER="" aws "$@"
   fi
 }
 
@@ -189,31 +206,80 @@ mkdir -p "$OUTPUT_DIR"
 chmod 700 "$OUTPUT_DIR"
 OUT_FILE="${OUTPUT_DIR%/}/${USER_NAME}.env"
 TMP_KEY_JSON=$(mktemp)
-trap 'rm -f "$TMP_KEY_JSON"' EXIT
+TMP_POLICY_JSON=$(mktemp)
+TMP_PAYLOAD_JSON=$(mktemp)
+TMP_RESPONSE_JSON=$(mktemp)
+trap 'rm -f "$TMP_KEY_JSON" "$TMP_POLICY_JSON" "$TMP_PAYLOAD_JSON" "$TMP_RESPONSE_JSON" /tmp/bedrock_key_verify_error.txt' EXIT
+
+if [[ -n "$RUNTIME_POLICY_JSON" ]]; then
+  if [[ ! -f "$RUNTIME_POLICY_JSON" ]]; then
+    echo "BEDROCK_KEY_RUNTIME_POLICY_JSON does not exist: $RUNTIME_POLICY_JSON" >&2
+    exit 2
+  fi
+  POLICY_DOCUMENT="file://$RUNTIME_POLICY_JSON"
+else
+  cat > "$TMP_POLICY_JSON" <<'JSON'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:ListFoundationModels",
+        "bedrock:GetFoundationModel"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:Converse",
+        "bedrock:ConverseStream"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+JSON
+  POLICY_DOCUMENT="file://$TMP_POLICY_JSON"
+fi
 
 echo "creating_user=$USER_NAME"
 echo "path=$CUSTOMER_PATH"
 echo "customer=$CUSTOMER_SLUG key_alias=$ALIAS_SLUG usage_owner=$USAGE_OWNER"
 
-aws_operator iam create-user \
-  --user-name "$USER_NAME" \
-  --path "$CUSTOMER_PATH" \
-  --permissions-boundary "$BOUNDARY_POLICY_ARN" \
-  --tags \
-    Key=Purpose,Value="$PURPOSE" \
-    Key=owner,Value="$OWNER" \
-    Key=customer,Value="$CUSTOMER_SLUG" \
-    Key=usageOwner,Value="$USAGE_OWNER" \
-    Key=keyAlias,Value="$ALIAS_SLUG" \
-    Key=region,Value="$REGION" \
-    Key=budgetScope,Value=bedrock \
-    Key=createdBy,Value="$CREATED_BY" \
-    Key=createdAt,Value="$CREATED_AT" \
-  >/dev/null
+create_user_args=(iam create-user --user-name "$USER_NAME" --path "$CUSTOMER_PATH")
+if [[ -n "$BOUNDARY_POLICY_ARN" ]]; then
+  create_user_args+=(--permissions-boundary "$BOUNDARY_POLICY_ARN")
+fi
+create_user_args+=(--tags
+  "Key=Purpose,Value=$PURPOSE"
+  "Key=owner,Value=$OWNER"
+  "Key=customer,Value=$CUSTOMER_SLUG"
+  "Key=usageOwner,Value=$USAGE_OWNER"
+  "Key=keyAlias,Value=$ALIAS_SLUG"
+  "Key=region,Value=$REGION"
+  "Key=budgetScope,Value=bedrock"
+  "Key=createdBy,Value=$CREATED_BY"
+  "Key=createdAt,Value=$CREATED_AT"
+)
 
-aws_operator iam attach-user-policy \
-  --user-name "$USER_NAME" \
-  --policy-arn "$RUNTIME_POLICY_ARN"
+aws_operator "${create_user_args[@]}" >/dev/null
+
+if [[ -n "$RUNTIME_POLICY_ARN" ]]; then
+  echo "runtime_policy=managed:$RUNTIME_POLICY_ARN"
+  aws_operator iam attach-user-policy \
+    --user-name "$USER_NAME" \
+    --policy-arn "$RUNTIME_POLICY_ARN"
+else
+  echo "runtime_policy=inline:$INLINE_POLICY_NAME"
+  aws_operator iam put-user-policy \
+    --user-name "$USER_NAME" \
+    --policy-name "$INLINE_POLICY_NAME" \
+    --policy-document "$POLICY_DOCUMENT"
+fi
 
 aws_operator iam create-access-key --user-name "$USER_NAME" > "$TMP_KEY_JSON"
 ACCESS_KEY_ID=$(jq -r '.AccessKey.AccessKeyId' "$TMP_KEY_JSON")
@@ -240,22 +306,53 @@ if [[ "$VERIFY" -eq 1 ]]; then
     model_count=""
     for attempt in $(seq 1 20); do
       set +e
-      model_count=$(aws bedrock list-foundation-models --region "$REGION" --query 'length(modelSummaries)' --output text 2>/tmp/bedrock_key_verify_error.txt)
-      status=$?
+      model_count=$(AWS_PAGER="" aws bedrock list-foundation-models --region "$REGION" --query 'length(modelSummaries)' --output text 2>/tmp/bedrock_key_verify_error.txt)
+      aws_status=$?
       set -e
-      if [[ "$status" -eq 0 ]]; then
+      if [[ "$aws_status" -eq 0 ]]; then
         break
       fi
       if [[ "$attempt" -eq 20 ]]; then
-        echo "bedrock_verify=failed"
+        echo "bedrock_list_models=failed"
         sed 's/^/  /' /tmp/bedrock_key_verify_error.txt
-        exit "$status"
+        exit "$aws_status"
       fi
       sleep 3
     done
     echo "bedrock_model_count=$model_count"
+
+    if [[ "$VERIFY_INVOKE" -eq 1 ]]; then
+      jq -nc '{
+        anthropic_version: "bedrock-2023-05-31",
+        max_tokens: 4,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {type: "text", text: "Reply with ok."}
+            ]
+          }
+        ]
+      }' > "$TMP_PAYLOAD_JSON"
+      if AWS_PAGER="" aws bedrock-runtime invoke-model \
+          --region "$REGION" \
+          --model-id "$VERIFY_MODEL_ID" \
+          --content-type application/json \
+          --accept application/json \
+          --body "fileb://$TMP_PAYLOAD_JSON" \
+          "$TMP_RESPONSE_JSON" >/dev/null 2>/tmp/bedrock_key_verify_error.txt; then
+        response_text=$(jq -r '.content[]? | select(.type=="text") | .text' "$TMP_RESPONSE_JSON" | head -n1)
+        echo "bedrock_invoke_model=$VERIFY_MODEL_ID"
+        echo "bedrock_invoke_response=${response_text:-ok}"
+      else
+        echo "bedrock_invoke=failed model=$VERIFY_MODEL_ID"
+        sed 's/^/  /' /tmp/bedrock_key_verify_error.txt
+        exit 4
+      fi
+    fi
+
     set +e
-    s3_out=$(aws s3 ls 2>&1)
+    AWS_PAGER="" aws s3 ls >/tmp/bedrock_key_verify_error.txt 2>&1
     s3_status=$?
     set -e
     if [[ "$s3_status" -eq 0 ]]; then

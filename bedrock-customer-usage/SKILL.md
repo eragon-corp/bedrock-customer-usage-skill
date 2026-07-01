@@ -26,8 +26,10 @@ bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh --hours 168
 - Scoped Cost Explorer: if `BEDROCK_USAGE_BILLING_VIEW_ARN` is set, query only that Billing View and group Bedrock cost by customer and usage-owner tags.
 - Usage: CloudTrail `LookupEvents`, filtered by customer access keys and `eventSource=bedrock.amazonaws.com`.
 - Key scope: IAM users under `BEDROCK_USAGE_CUSTOMER_PATH`.
-- Diagnostics: `cloudwatch:ListMetrics` for `AWS/Bedrock` and `bedrock:GetModelInvocationLoggingConfiguration`.
+- Diagnostics: `cloudwatch:ListMetrics`, `cloudwatch:GetMetricData` for returned `AWS/Bedrock` metrics, and `bedrock:GetModelInvocationLoggingConfiguration`.
 - Key creation: `scripts/create_bedrock_customer_key.sh` creates one IAM user per access key and tags it for future customer-level and key-level cost attribution.
+- Operator smoke test: `scripts/smoke_bedrock_customer_operator.sh` creates a temporary user/key, verifies Bedrock list/invoke, disables and deletes the temporary access key, and tries to clean up the temporary user.
+- Key disable: `scripts/disable_bedrock_customer_key.sh` disables one key after verifying it belongs to the configured customer path.
 
 ## Credentials
 
@@ -42,6 +44,11 @@ The scripts auto-load shared configuration from the first file that exists:
 - `bedrock-customer-usage/config.env`
 
 Never print full `AWS_SECRET_ACCESS_KEY` values. Mask access key ids unless the user explicitly needs an exact id for AWS lookup.
+
+Minimum create-key permissions for the default inline-policy path are:
+`iam:CreateUser`, `iam:TagUser`, `iam:PutUserPolicy`, `iam:CreateAccessKey`, `iam:UpdateAccessKey`, `iam:DeleteAccessKey`, `iam:GetUser`, `iam:ListUsers`, `iam:ListAccessKeys`, and `iam:ListUserTags`, scoped to the configured customer path.
+
+Usage checks need only the read-only services that are enabled in the account: Budget read, CloudTrail lookup, CloudWatch metric list/data, and Bedrock logging config. Raw CloudWatch Logs or S3 invocation logs are not part of the default path.
 
 ## Interpretation
 
@@ -69,6 +76,22 @@ bedrock-customer-usage/scripts/create_bedrock_customer_key.sh --customer example
 ```
 
 Keep the invariant: one access key equals one IAM user. The script tags each IAM user with `customer` and `usageOwner`; those tags are intended for future AWS cost allocation after activation.
+
+By default, the script uses `iam:PutUserPolicy` to add a small inline policy for Bedrock list/invoke/converse. Managed runtime policy attachment and permissions boundaries are optional config values, not required for the default path.
+
+If someone asks for `iam:CreateServiceSpecificCredential`, clarify that Bedrock SDK/CLI/server access uses normal IAM access key plus secret key credentials. Service-specific credentials are not the right mechanism for Bedrock runtime calls.
+
+For a full operator check, run:
+
+```bash
+bedrock-customer-usage/scripts/smoke_bedrock_customer_operator.sh
+```
+
+For disabling a customer key:
+
+```bash
+bedrock-customer-usage/scripts/disable_bedrock_customer_key.sh --access-key-id AKIA...
+```
 
 ## Safety Boundary
 
