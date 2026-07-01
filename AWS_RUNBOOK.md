@@ -117,6 +117,36 @@ Example operator policy:
 }
 ```
 
+Optional scoped Cost Explorer read policy:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadScopedBillingView",
+      "Effect": "Allow",
+      "Action": "billing:GetBillingView",
+      "Resource": "arn:aws:billing::<account-id>:billingview/custom-..."
+    },
+    {
+      "Sid": "ReadCostExplorer",
+      "Effect": "Allow",
+      "Action": [
+        "ce:GetCostAndUsage",
+        "ce:GetTags",
+        "ce:GetDimensionValues"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+When Cost Explorer access is enabled, always call it with the configured
+`--billing-view-arn`. That keeps the query result scoped even when Cost Explorer
+actions require broad IAM resources.
+
 Optional cleanup permissions for the smoke test:
 
 ```json
@@ -304,28 +334,162 @@ aws s3 ls
 
 Expected result: access denied.
 
-## Check Usage
+## Check Cost
 
-Run:
+Cost checks answer:
+
+```text
+How much has this customer scope spent this month?
+Is the monthly budget alert configured and healthy?
+Can cost be grouped by customer or per-key usageOwner tags?
+```
+
+Run the bundled checker:
 
 ```bash
 export BEDROCK_USAGE_OPERATOR_CREDENTIALS=/secure/path/operator.env
 bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh --hours 24
 ```
 
-For a larger CloudTrail window:
+The cost sections in the output are:
+
+```text
+== Budget cost ==
+budget=<budget-name>
+limit=<amount> USD / MONTHLY
+actual=<amount> USD
+tag_filter=<budget tag filters>
+service_filters_count=<number>
+notifications=
+  ACTUAL GREATER_THAN <threshold>% state=<state>
+
+== Scoped Cost Explorer ==
+period=<month-start>..<tomorrow>
+service=Amazon Bedrock
+billing_view=<billing-view-arn>
+total_unblended_cost=<amount> USD estimated=<true|false>
+by_customer_groups=<number>
+by_usageOwner_groups=<number>
+```
+
+If `BEDROCK_USAGE_BILLING_VIEW_ARN` is not configured, Budget status still
+works, but scoped Cost Explorer totals are skipped.
+
+Important cost limitations:
+
+- Budgets and Cost Explorer are delayed billing views.
+- A new IAM tag may not appear as a cost allocation tag immediately.
+- A new access key can have CloudTrail usage before any cost appears.
+- Per-key cost requires one key per IAM user and active cost allocation tags
+  such as `user:iamPrincipal/usageOwner`.
+
+Direct AWS CLI checks for administrators:
+
+```bash
+aws budgets describe-budget \
+  --account-id 123456789012 \
+  --budget-name 'Customer Bedrock monthly budget'
+
+aws budgets describe-notifications-for-budget \
+  --account-id 123456789012 \
+  --budget-name 'Customer Bedrock monthly budget'
+```
+
+With a Billing View:
+
+```bash
+aws ce get-cost-and-usage \
+  --billing-view-arn arn:aws:billing::123456789012:billingview/custom-... \
+  --time-period Start=2026-07-01,End=2026-07-02 \
+  --granularity MONTHLY \
+  --metrics UnblendedCost UsageQuantity \
+  --filter '{"Dimensions":{"Key":"SERVICE","Values":["Amazon Bedrock"]}}' \
+  --region us-east-1
+```
+
+## Check Usage
+
+Usage checks answer:
+
+```text
+Which customer keys exist?
+Which keys are active or inactive?
+Which keys recently called Bedrock?
+Which model ids were called?
+Were there Bedrock errors?
+Are CloudWatch Bedrock metrics and invocation logging visible?
+```
+
+Run a short CloudTrail window:
+
+```bash
+export BEDROCK_USAGE_OPERATOR_CREDENTIALS=/secure/path/operator.env
+bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh --hours 24
+```
+
+Run a larger CloudTrail window:
 
 ```bash
 bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh --hours 168 --recent 20
 ```
 
-Interpretation:
+The usage sections in the output are:
 
-- Budget and Cost Explorer are delayed billing views.
+```text
+== Customer keys ==
+users=<count> path=<customer-path>
+user=<iam-user> key=<masked-key> status=<Active|Inactive> created=<date> customer=<tag> usageOwner=<tag>
+
+== CloudTrail Bedrock usage ==
+bedrock_events=<count>
+by_key=
+  key=<masked-key> user=<iam-user> events=<count> errors=<count>
+by_model=
+  model=<model-id> events=<count>
+recent=
+  <event-time> <event-name> key=<masked-key> model=<model-id> error=<error-code|none>
+
+== CloudWatch and Bedrock logging diagnostics ==
+cloudwatch_list_metrics=<ok|unavailable> count=<count>
+cloudwatch_get_metric_data=<ok|unavailable|skipped>
+bedrock_invocation_logging=<ok|unavailable>
+```
+
+Important usage limitations:
+
 - CloudTrail is better for recent activity by access key.
+- CloudTrail Event History is limited and normally covers recent events only.
+- CloudTrail tells you calls, models, and errors; it is not an exact cost meter.
 - CloudWatch metrics are account/model-level signals, not guaranteed per key.
 - Exact token-level usage by IAM user/key/model requires Bedrock invocation
   logging and scoped read access to the chosen log destination.
+
+Direct AWS CLI checks for administrators:
+
+```bash
+aws iam list-users \
+  --path-prefix /bedrock-customers/customer/
+
+aws iam list-access-keys \
+  --user-name <customer-iam-user>
+
+aws iam list-user-tags \
+  --user-name <customer-iam-user>
+
+aws cloudtrail lookup-events \
+  --region ap-southeast-1 \
+  --lookup-attributes AttributeKey=AccessKeyId,AttributeValue=<access-key-id> \
+  --start-time 2026-07-01T00:00:00Z \
+  --end-time 2026-07-02T00:00:00Z \
+  --max-results 50
+
+aws cloudwatch list-metrics \
+  --region ap-southeast-1 \
+  --namespace AWS/Bedrock
+
+aws bedrock get-model-invocation-logging-configuration \
+  --region ap-southeast-1
+```
 
 ## Disable a Customer Key
 

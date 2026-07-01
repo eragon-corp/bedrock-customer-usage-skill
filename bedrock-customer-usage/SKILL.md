@@ -60,6 +60,57 @@ Usage checks need only the read-only services that are enabled in the account: B
 - If a customer-scoped Billing View ARN is configured, the operator may query Cost Explorer through that view only.
 - The operator should be able to view only the customer Budget alert and the scoped Billing View, not broad Cost Explorer data.
 
+## Cost Check Workflow
+
+Use this workflow when the user asks for spend, cost, budget, alert status, monthly total, or per-customer/per-key cost.
+
+Run:
+
+```bash
+BEDROCK_USAGE_OPERATOR_CREDENTIALS=/secure/path/operator.env \
+bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh --hours 24
+```
+
+Read these output sections:
+
+- `Budget cost`: budget name, monthly limit, actual spend, tag filters, service filters, and notification states.
+- `Scoped Cost Explorer`: current-month Bedrock `UnblendedCost` and `UsageQuantity` through `BEDROCK_USAGE_BILLING_VIEW_ARN`, plus grouping by `user:iamPrincipal/customer` and `user:iamPrincipal/usageOwner`.
+- `total_unblended_cost=unavailable`: usually means the operator lacks scoped Cost Explorer/Billing View permissions or the Billing View ARN is not configured.
+- `actual=0` or missing tag groups: can be normal for new keys because AWS billing and cost allocation tags are delayed.
+
+For exact language to the user:
+
+```text
+Cost is billing-delayed. The dashboard/script can show current Budget and scoped Cost Explorer totals, but recent calls may show in CloudTrail before dollars appear in Cost Explorer.
+```
+
+Do not claim per-key cost exists unless `usageOwner` cost allocation tags are active and Cost Explorer returns grouped data for that tag.
+
+## Usage Check Workflow
+
+Use this workflow when the user asks who used the key, whether a key is active, which model was called, or whether a customer key recently invoked Bedrock.
+
+Run:
+
+```bash
+BEDROCK_USAGE_OPERATOR_CREDENTIALS=/secure/path/operator.env \
+bedrock-customer-usage/scripts/check_bedrock_customer_usage.sh --hours 168 --recent 20
+```
+
+Read these output sections:
+
+- `Customer keys`: IAM users under `BEDROCK_USAGE_CUSTOMER_PATH`, masked access key ids, active/inactive status, creation date, and attribution tags.
+- `CloudTrail Bedrock usage`: Bedrock events grouped by access key and model id, plus recent event names and error codes.
+- `CloudWatch and Bedrock logging diagnostics`: whether account-level Bedrock metrics and invocation logging config are visible.
+
+For exact language to the user:
+
+```text
+Usage here means recent Bedrock API activity from CloudTrail, grouped by customer access key. It is useful for activity/debugging, but it is not exact token or dollar cost.
+```
+
+Token-level usage by IAM user/key/model requires Bedrock invocation logging and scoped read access to the log destination. Raw CloudWatch Logs or S3 read access is not part of the default workflow because it may expose prompt/response data.
+
 ## Create-Key Workflow
 
 Use the create-key script when asked to provision a new Bedrock customer API key:
