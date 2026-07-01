@@ -1,6 +1,6 @@
 # AWS Runbook: Customer-Scoped Bedrock Keys
 
-This runbook describes how to operate customer-scoped AWS Bedrock access keys
+This runbook describes how to operate customer-scoped AWS Bedrock credentials
 with least-privilege IAM, budget visibility, and usage checks.
 
 Use placeholders in this document as-is. Do not commit real account ids,
@@ -8,13 +8,13 @@ customer names, access keys, or secret keys.
 
 ## Goal
 
-Provision one Bedrock access key per downstream customer or customer workload,
-while keeping each key attributable and easy to disable.
+Provision one Bedrock credential per downstream customer or customer workload,
+while keeping each credential attributable and easy to disable.
 
 The operating model is:
 
 ```text
-one customer key = one IAM user = one AWS access key pair
+one customer credential = one IAM user = one AWS access key pair or Bedrock bearer credential
 ```
 
 Each IAM user is created under a customer path such as:
@@ -84,6 +84,33 @@ Example operator policy:
         "iam:GetUser",
         "iam:ListAccessKeys",
         "iam:ListUserTags"
+      ],
+      "Resource": "arn:aws:iam::<account-id>:user/bedrock-customers/customer/*"
+    },
+    {
+      "Sid": "CreateBedrockBearerCredentialsInPath",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceSpecificCredential",
+      "Resource": "arn:aws:iam::<account-id>:user/bedrock-customers/customer/*",
+      "Condition": {
+        "StringEquals": {
+          "iam:ServiceSpecificCredentialServiceName": "bedrock.amazonaws.com"
+        },
+        "NumericLessThanEquals": {
+          "iam:ServiceSpecificCredentialAgeDays": "90"
+        },
+        "Null": {
+          "iam:ServiceSpecificCredentialAgeDays": "false"
+        }
+      }
+    },
+    {
+      "Sid": "ManageBedrockBearerCredentialsInPath",
+      "Effect": "Allow",
+      "Action": [
+        "iam:ListServiceSpecificCredentials",
+        "iam:UpdateServiceSpecificCredential",
+        "iam:DeleteServiceSpecificCredential"
       ],
       "Resource": "arn:aws:iam::<account-id>:user/bedrock-customers/customer/*"
     },
@@ -165,6 +192,8 @@ Optional cleanup permissions for the smoke test:
 {
   "Effect": "Allow",
   "Action": [
+    "iam:DeleteAccessKey",
+    "iam:DeleteServiceSpecificCredential",
     "iam:DeleteUserPolicy",
     "iam:DeleteUser"
   ],
@@ -173,8 +202,8 @@ Optional cleanup permissions for the smoke test:
 ```
 
 If you do not grant the optional cleanup permissions, the smoke test still
-disables and deletes the temporary access key, then prints the admin cleanup
-commands for the temporary IAM user.
+disables and deletes the temporary credential when allowed, then prints the
+admin cleanup commands for the temporary IAM user if user cleanup is blocked.
 
 ## Bootstrap Cost Attribution
 
@@ -232,6 +261,9 @@ export BEDROCK_KEY_OWNER=customer-owner
 export BEDROCK_KEY_PURPOSE=customer-purpose
 export BEDROCK_KEY_REGION=ap-southeast-1
 export BEDROCK_KEY_VERIFY_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
+# Optional; default is access-key.
+# export BEDROCK_KEY_CREDENTIAL_TYPE=access-key
+# export BEDROCK_KEY_BEARER_TOKEN_DAYS=90
 ```
 
 Put the operator credential in a private env file outside the repo:
@@ -256,6 +288,7 @@ Expected result:
 
 ```text
 creating_user=bedrock-smoke-...
+credential_type=access-key
 runtime_policy=inline:BedrockCustomerRuntime
 bedrock_model_count=<number>
 bedrock_invoke_response=ok
@@ -263,8 +296,25 @@ s3=denied_ok
 smoke_result=ok
 ```
 
+To test Bedrock bearer API keys:
+
+```bash
+bedrock-customer-usage/scripts/smoke_bedrock_customer_operator.sh \
+  --credential-type bearer \
+  --bearer-token-days 1
+```
+
+Expected bearer result:
+
+```text
+credential_type=bearer
+bedrock_converse_response=Ok.
+s3=not_applicable_for_bearer
+smoke_result=ok
+```
+
 If cleanup is manual, run the printed admin cleanup commands after confirming
-the temporary access key was disabled and deleted.
+the temporary credential was disabled and deleted.
 
 ## Create a Customer Key
 
@@ -295,11 +345,12 @@ The script creates:
 
 - One IAM user under the configured path
 - One inline Bedrock runtime policy
-- One access key pair
+- One credential: AWS access key pair by default, or Bedrock bearer credential
+  when requested
 - One local `0600` env file with the customer credential
-- Tags for both FRAI/customer grouping and per-key grouping
+- Tags for both customer grouping and per-key grouping
 
-The customer receives:
+For the default access-key path, the customer receives:
 
 ```bash
 export AWS_ACCESS_KEY_ID=...
@@ -308,8 +359,29 @@ export AWS_REGION=ap-southeast-1
 export AWS_DEFAULT_REGION=ap-southeast-1
 ```
 
-Bedrock uses normal IAM access key and secret key credentials. Do not use
-`iam:CreateServiceSpecificCredential` for Bedrock runtime access.
+If the customer specifically needs a Bedrock bearer API key, run:
+
+```bash
+bedrock-customer-usage/scripts/create_bedrock_customer_key.sh \
+  --customer example-customer \
+  --key-alias prod \
+  --credential-type bearer \
+  --bearer-token-days 90 \
+  --output-dir ./secrets
+```
+
+The customer receives:
+
+```bash
+export AWS_BEARER_TOKEN_BEDROCK=...
+export AWS_REGION=ap-southeast-1
+export AWS_DEFAULT_REGION=ap-southeast-1
+```
+
+Bearer API keys are IAM service-specific credentials for
+`bedrock.amazonaws.com`. The customer runtime policy must allow
+`bedrock:CallWithBearerToken`, and the operator create permission should require
+`iam:ServiceSpecificCredentialAgeDays <= 90`.
 
 ## Verify a Customer Key Manually
 
@@ -360,6 +432,30 @@ aws s3 ls
 ```
 
 Expected result: access denied.
+
+For a Bedrock bearer API key, verify with the Converse endpoint instead:
+
+```bash
+jq -nc '{
+  messages: [
+    {
+      role: "user",
+      content: [{text: "Reply with ok."}]
+    }
+  ],
+  inferenceConfig: {maxTokens: 4}
+}' > /tmp/bedrock-converse-body.json
+
+curl -sS \
+  -X POST "https://bedrock-runtime.ap-southeast-1.amazonaws.com/model/anthropic.claude-3-haiku-20240307-v1%3A0/converse" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $AWS_BEARER_TOKEN_BEDROCK" \
+  --data-binary @/tmp/bedrock-converse-body.json \
+  | jq -r '.output.message.content[]? | .text // empty'
+```
+
+Bearer API keys may need a short propagation delay after creation. The script
+handles this with retries.
 
 ## Check Cost
 
@@ -591,6 +687,25 @@ aws iam update-access-key \
 
 It does not delete the IAM user or the access key.
 
+For a Bedrock bearer API key:
+
+```bash
+bedrock-customer-usage/scripts/disable_bedrock_customer_key.sh \
+  --service-credential-id ACCA...
+```
+
+The script resolves the service-specific credential under the configured
+customer path, then runs:
+
+```bash
+aws iam update-service-specific-credential \
+  --user-name <customer-user> \
+  --service-specific-credential-id <service-credential-id> \
+  --status Inactive
+```
+
+It does not delete the IAM user or the service-specific credential.
+
 ## Optional: Invocation Logging
 
 Enable Bedrock model invocation logging only after deciding what data may be
@@ -622,8 +737,10 @@ visibility risk is explicitly accepted.
 
 `iam:CreateServiceSpecificCredential` failed:
 
-Bedrock does not need service-specific credentials. Use normal IAM access key
-and secret key credentials.
+Use this action only for Bedrock bearer API keys. Check that the operator is
+creating credentials for `bedrock.amazonaws.com`, that
+`CredentialAgeDays` is present and no more than 90, and that the target IAM user
+is under the configured customer path with the required tags.
 
 Model list succeeds but model invoke fails:
 
@@ -644,5 +761,5 @@ usage ledger.
 
 Smoke test leaves a temporary IAM user:
 
-The operator can disable/delete the temporary access key, but may not have user
-delete permissions. Run the printed admin cleanup commands.
+The operator can usually disable/delete the temporary credential, but may not
+have user delete permissions. Run the printed admin cleanup commands.

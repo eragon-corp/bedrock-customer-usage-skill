@@ -212,7 +212,9 @@ echo "users=$user_count path=$CUSTOMER_PATH"
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
 keys_file="$tmp_dir/keys.tsv"
+service_credentials_file="$tmp_dir/service-credentials.tsv"
 : > "$keys_file"
+: > "$service_credentials_file"
 
 printf '%s' "$users_json" | jq -r '.Users[]?.UserName' | while IFS= read -r user_name; do
   tags_json=$(aws_operator iam list-user-tags --user-name "$user_name" --output json)
@@ -227,14 +229,32 @@ printf '%s' "$users_json" | jq -r '.Users[]?.UserName' | while IFS= read -r user
     | [$user, .AccessKeyId, .Status, .CreateDate, $purpose, $owner, $customer, $usage_owner, $key_alias]
     | @tsv
   ' >> "$keys_file"
+  service_credentials_json=$(aws_operator iam list-service-specific-credentials \
+    --user-name "$user_name" \
+    --service-name bedrock.amazonaws.com \
+    --output json 2>/dev/null || printf '{}')
+  printf '%s' "$service_credentials_json" | jq -r --arg user "$user_name" --arg purpose "$purpose" --arg owner "$owner" --arg customer "$customer" --arg usage_owner "$usage_owner" --arg key_alias "$key_alias" '
+    .ServiceSpecificCredentials[]?
+    | [$user, .ServiceSpecificCredentialId, .Status, .CreateDate, (.ServiceName // "bedrock.amazonaws.com"), $purpose, $owner, $customer, $usage_owner, $key_alias]
+    | @tsv
+  ' >> "$service_credentials_file"
 done
 
 if [[ -s "$keys_file" ]]; then
+  echo "access_keys="
   while IFS=$'\t' read -r user_name key_id status create_date purpose owner customer usage_owner key_alias; do
-    echo "user=$user_name key=$(mask_key "$key_id") status=$status created=$create_date Purpose=${purpose:-} owner=${owner:-} customer=${customer:-} usageOwner=${usage_owner:-} keyAlias=${key_alias:-}"
+    echo "  user=$user_name key=$(mask_key "$key_id") status=$status created=$create_date Purpose=${purpose:-} owner=${owner:-} customer=${customer:-} usageOwner=${usage_owner:-} keyAlias=${key_alias:-}"
   done < "$keys_file"
 else
   echo "no access keys found"
+fi
+if [[ -s "$service_credentials_file" ]]; then
+  echo "bedrock_bearer_credentials="
+  while IFS=$'\t' read -r user_name credential_id status create_date service_name purpose owner customer usage_owner key_alias; do
+    echo "  user=$user_name service_credential=$(mask_key "$credential_id") status=$status created=$create_date service=$service_name Purpose=${purpose:-} owner=${owner:-} customer=${customer:-} usageOwner=${usage_owner:-} keyAlias=${key_alias:-}"
+  done < "$service_credentials_file"
+else
+  echo "no Bedrock bearer credentials found"
 fi
 echo
 
@@ -329,8 +349,11 @@ while IFS=$'\t' read -r user_name key_id status create_date purpose owner custom
       | (.CloudTrailEvent | fromjson?)
       | select(.eventSource == "bedrock.amazonaws.com")
       | {
+          eventId: (.eventID // null),
+          credentialType: "access-key",
           userName: $user,
           accessKeyId: $key,
+          serviceCredentialId: null,
           eventTime,
           eventName,
           region: .awsRegion,
@@ -350,20 +373,72 @@ while IFS=$'\t' read -r user_name key_id status create_date purpose owner custom
   done
 done < "$keys_file"
 
+while IFS=$'\t' read -r user_name credential_id status create_date service_name purpose owner customer usage_owner key_alias; do
+  [[ "$status" == "Active" ]] || continue
+  next_token=""
+  page=0
+  while [[ $page -lt $MAX_PAGES ]]; do
+    args=(cloudtrail lookup-events
+      --region "$REGION"
+      --lookup-attributes "AttributeKey=Username,AttributeValue=$user_name"
+      --start-time "$START_TIME"
+      --end-time "$END_TIME"
+      --max-results 50
+      --output json)
+    if [[ -n "$next_token" ]]; then
+      args+=(--next-token "$next_token")
+    fi
+    page_json=$(aws_operator "${args[@]}")
+    printf '%s' "$page_json" | jq -c --arg user "$user_name" --arg credential "$credential_id" '
+      .Events[]?
+      | (.CloudTrailEvent | fromjson?)
+      | select(.eventSource == "bedrock.amazonaws.com")
+      | {
+          eventId: (.eventID // null),
+          credentialType: "bearer",
+          userName: $user,
+          accessKeyId: null,
+          serviceCredentialId: $credential,
+          eventTime,
+          eventName,
+          region: .awsRegion,
+          modelId: (
+            .requestParameters.modelId
+            // .requestParameters.modelIdentifier
+            // .requestParameters.foundationModelIdentifier
+            // null
+          ),
+          errorCode: (.errorCode // null)
+        }
+    ' >> "$events_file"
+    next_token=$(printf '%s' "$page_json" | jq -r '.NextToken // empty')
+    [[ -n "$next_token" ]] || break
+    page=$((page + 1))
+    sleep 0.6
+  done
+done < "$service_credentials_file"
+
+if [[ -s "$events_file" ]]; then
+  unique_events_file="$tmp_dir/events-unique.jsonl"
+  jq -sc '. | unique_by((.eventId // "") + ":" + (.credentialType // "") + ":" + (.userName // "") + ":" + (.eventTime // "") + ":" + (.eventName // "")) | .[]' "$events_file" > "$unique_events_file"
+  mv "$unique_events_file" "$events_file"
+fi
+
 event_count=$(wc -l < "$events_file" | tr -d ' ')
 echo "bedrock_events=$event_count"
 if [[ "$event_count" != "0" ]]; then
-  echo "by_key="
+  echo "by_credential="
   jq -sr '
-    group_by(.accessKeyId)
+    group_by((.credentialType // "") + ":" + (.userName // "") + ":" + (.accessKeyId // .serviceCredentialId // "unknown"))
     | .[]
     | {
-        key: (.[0].accessKeyId[0:8] + "..." + .[0].accessKeyId[-4:]),
+        type: .[0].credentialType,
+        id: ((.[0].accessKeyId // .[0].serviceCredentialId // "unknown") as $id | if ($id | length) > 12 then ($id[0:8] + "..." + $id[-4:]) else $id end),
         user: .[0].userName,
         events: length,
         errors: map(select(.errorCode != null)) | length
       }
-    | "  key=\(.key) user=\(.user) events=\(.events) errors=\(.errors)"
+    | "  type=\(.type) id=\(.id) user=\(.user) events=\(.events) errors=\(.errors)"
   ' "$events_file"
   echo "by_model="
   jq -sr '
@@ -379,7 +454,8 @@ if [[ "$event_count" != "0" ]]; then
     | reverse
     | .[:$n]
     | .[]
-    | "  \(.eventTime) \(.eventName) key=\(.accessKeyId[0:8])...\(.accessKeyId[-4:]) model=\(.modelId // "unknown") error=\(.errorCode // "none")"
+    | (.accessKeyId // .serviceCredentialId // "unknown") as $id
+    | "  \(.eventTime) \(.eventName) type=\(.credentialType) id=\(if ($id | length) > 12 then ($id[0:8] + "..." + $id[-4:]) else $id end) model=\(.modelId // "unknown") error=\(.errorCode // "none")"
   ' "$events_file"
 fi
 echo

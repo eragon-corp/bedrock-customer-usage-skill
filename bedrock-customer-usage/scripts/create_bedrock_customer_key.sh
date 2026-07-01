@@ -36,13 +36,16 @@ OUTPUT_DIR="./secrets"
 VERIFY=1
 VERIFY_INVOKE=1
 VERIFY_MODEL_ID="${BEDROCK_KEY_VERIFY_MODEL_ID:-anthropic.claude-3-haiku-20240307-v1:0}"
+CREDENTIAL_TYPE="${BEDROCK_KEY_CREDENTIAL_TYPE:-access-key}"
+BEARER_TOKEN_DAYS="${BEDROCK_KEY_BEARER_TOKEN_DAYS:-90}"
 
 usage() {
   cat <<EOF
-Usage: $0 (--customer NAME | --auto-customer) [--key-alias NAME] [--usage-owner VALUE] [--user-name NAME] [--output-dir DIR] [--verify-model MODEL_ID] [--no-verify] [--no-verify-invoke]
+Usage: $0 (--customer NAME | --auto-customer) [--key-alias NAME] [--usage-owner VALUE] [--user-name NAME] [--output-dir DIR] [--credential-type access-key|bearer] [--bearer-token-days DAYS] [--verify-model MODEL_ID] [--no-verify] [--no-verify-invoke]
 
-Creates one IAM user and one Bedrock access key, with tags for future customer
-and per-key cost attribution.
+Creates one IAM user and one Bedrock credential, with tags for future customer
+and per-key cost attribution. The default credential type is AWS access key +
+secret key. Use --credential-type bearer for AWS_BEARER_TOKEN_BEDROCK.
 
 Use --auto-customer only for test or temporary keys. Production customer keys
 should pass a stable --customer value for readable cost attribution.
@@ -58,6 +61,8 @@ Credentials:
 
 Optional environment:
   BEDROCK_KEY_REGION
+  BEDROCK_KEY_CREDENTIAL_TYPE          default: access-key
+  BEDROCK_KEY_BEARER_TOKEN_DAYS        default: 90, max: 90
   BEDROCK_KEY_CREATED_BY
   BEDROCK_KEY_RUNTIME_POLICY_JSON      path to a custom inline policy JSON file
   BEDROCK_KEY_INLINE_POLICY_NAME       default: BedrockCustomerRuntime
@@ -91,6 +96,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --output-dir)
       OUTPUT_DIR="$2"
+      shift 2
+      ;;
+    --credential-type)
+      CREDENTIAL_TYPE="$2"
+      shift 2
+      ;;
+    --access-key)
+      CREDENTIAL_TYPE="access-key"
+      shift
+      ;;
+    --bearer-token)
+      CREDENTIAL_TYPE="bearer"
+      shift
+      ;;
+    --bearer-token-days|--credential-age-days)
+      BEARER_TOKEN_DAYS="$2"
       shift 2
       ;;
     --verify-model)
@@ -129,6 +150,27 @@ if [[ -z "$CUSTOMER" && "$AUTO_CUSTOMER" -ne 1 ]]; then
   exit 2
 fi
 
+case "$CREDENTIAL_TYPE" in
+  access-key|bearer)
+    ;;
+  *)
+    echo "--credential-type must be access-key or bearer" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$CREDENTIAL_TYPE" == "bearer" ]]; then
+  if ! [[ "$BEARER_TOKEN_DAYS" =~ ^[0-9]+$ ]]; then
+    echo "--bearer-token-days must be an integer" >&2
+    exit 2
+  fi
+  if (( BEARER_TOKEN_DAYS < 1 || BEARER_TOKEN_DAYS > 90 )); then
+    echo "--bearer-token-days must be between 1 and 90" >&2
+    exit 2
+  fi
+fi
+
 CREATED_BY="${BEDROCK_KEY_CREATED_BY:-bedrock-customer-key-manager}"
 CUSTOMER_PATH="${BEDROCK_KEY_CUSTOMER_PATH:?Set BEDROCK_KEY_CUSTOMER_PATH or BEDROCK_CUSTOMER_USAGE_CONFIG}"
 OWNER="${BEDROCK_KEY_OWNER:?Set BEDROCK_KEY_OWNER or BEDROCK_CUSTOMER_USAGE_CONFIG}"
@@ -150,6 +192,9 @@ require_bin() {
 require_bin aws
 require_bin jq
 require_bin python3
+if [[ "$CREDENTIAL_TYPE" == "bearer" && "$VERIFY_INVOKE" -eq 1 ]]; then
+  require_bin curl
+fi
 
 slugify() {
   python3 - "$1" <<'PY'
@@ -172,6 +217,15 @@ mask_key() {
   fi
 }
 
+mask_secret() {
+  local value="$1"
+  if [[ ${#value} -le 12 ]]; then
+    printf '***'
+  else
+    printf '%s...%s' "${value:0:6}" "${value: -4}"
+  fi
+}
+
 aws_operator() {
   if [[ -n "$OPERATOR_CRED" ]]; then
     if [[ ! -f "$OPERATOR_CRED" ]]; then
@@ -187,6 +241,28 @@ aws_operator() {
     )
   else
     AWS_PAGER="" aws "$@"
+  fi
+}
+
+create_bedrock_service_credential() {
+  local target_user="$1"
+  local days="$2"
+  local helper="$SCRIPT_DIR/iam_create_bedrock_service_credential.py"
+
+  if [[ -n "$OPERATOR_CRED" ]]; then
+    if [[ ! -f "$OPERATOR_CRED" ]]; then
+      echo "BEDROCK_KEY_OPERATOR_CREDENTIALS does not exist: $OPERATOR_CRED" >&2
+      exit 2
+    fi
+    (
+      set -a
+      # shellcheck disable=SC1090
+      source "$OPERATOR_CRED"
+      set +a
+      python3 "$helper" --user-name "$target_user" --credential-age-days "$days"
+    )
+  else
+    python3 "$helper" --user-name "$target_user" --credential-age-days "$days"
   fi
 }
 
@@ -232,9 +308,10 @@ chmod 700 "$OUTPUT_DIR"
 OUT_FILE="${OUTPUT_DIR%/}/${USER_NAME}.env"
 TMP_KEY_JSON=$(mktemp)
 TMP_POLICY_JSON=$(mktemp)
+TMP_POLICY_NEXT_JSON=$(mktemp)
 TMP_PAYLOAD_JSON=$(mktemp)
 TMP_RESPONSE_JSON=$(mktemp)
-trap 'rm -f "$TMP_KEY_JSON" "$TMP_POLICY_JSON" "$TMP_PAYLOAD_JSON" "$TMP_RESPONSE_JSON" /tmp/bedrock_key_verify_error.txt' EXIT
+trap 'rm -f "$TMP_KEY_JSON" "$TMP_POLICY_JSON" "$TMP_POLICY_NEXT_JSON" "$TMP_PAYLOAD_JSON" "$TMP_RESPONSE_JSON" /tmp/bedrock_key_verify_error.txt' EXIT
 
 if [[ -n "$RUNTIME_POLICY_JSON" ]]; then
   if [[ ! -f "$RUNTIME_POLICY_JSON" ]]; then
@@ -251,7 +328,9 @@ else
       "Effect": "Allow",
       "Action": [
         "bedrock:ListFoundationModels",
-        "bedrock:GetFoundationModel"
+        "bedrock:GetFoundationModel",
+        "bedrock:ListInferenceProfiles",
+        "bedrock:GetInferenceProfile"
       ],
       "Resource": "*"
     },
@@ -268,11 +347,16 @@ else
   ]
 }
 JSON
+  if [[ "$CREDENTIAL_TYPE" == "bearer" ]]; then
+    jq '.Statement[1].Action += ["bedrock:CallWithBearerToken"]' "$TMP_POLICY_JSON" > "$TMP_POLICY_NEXT_JSON"
+    mv "$TMP_POLICY_NEXT_JSON" "$TMP_POLICY_JSON"
+  fi
   POLICY_DOCUMENT="file://$TMP_POLICY_JSON"
 fi
 
 echo "creating_user=$USER_NAME"
 echo "path=$CUSTOMER_PATH"
+echo "credential_type=$CREDENTIAL_TYPE"
 if [[ "$AUTO_CUSTOMER" -eq 1 ]]; then
   echo "auto_customer=true"
 fi
@@ -309,19 +393,38 @@ else
     --policy-document "$POLICY_DOCUMENT"
 fi
 
-aws_operator iam create-access-key --user-name "$USER_NAME" > "$TMP_KEY_JSON"
-ACCESS_KEY_ID=$(jq -r '.AccessKey.AccessKeyId' "$TMP_KEY_JSON")
+if [[ "$CREDENTIAL_TYPE" == "bearer" ]]; then
+  create_bedrock_service_credential "$USER_NAME" "$BEARER_TOKEN_DAYS" > "$TMP_KEY_JSON"
+  SERVICE_CREDENTIAL_ID=$(jq -r '.ServiceSpecificCredential.ServiceSpecificCredentialId' "$TMP_KEY_JSON")
+  BEARER_TOKEN=$(jq -r '.ServiceSpecificCredential.ServiceApiKeyValue' "$TMP_KEY_JSON")
 
-umask 077
-jq -r --arg region "$REGION" '
-  "export AWS_ACCESS_KEY_ID=" + .AccessKey.AccessKeyId,
-  "export AWS_SECRET_ACCESS_KEY=" + .AccessKey.SecretAccessKey,
-  "export AWS_REGION=" + $region,
-  "export AWS_DEFAULT_REGION=" + $region
-' "$TMP_KEY_JSON" > "$OUT_FILE"
-chmod 600 "$OUT_FILE"
+  umask 077
+  jq -r --arg region "$REGION" '
+    "export AWS_BEARER_TOKEN_BEDROCK=" + .ServiceSpecificCredential.ServiceApiKeyValue,
+    "export AWS_REGION=" + $region,
+    "export AWS_DEFAULT_REGION=" + $region,
+    "export BEDROCK_SERVICE_SPECIFIC_CREDENTIAL_ID=" + .ServiceSpecificCredential.ServiceSpecificCredentialId
+  ' "$TMP_KEY_JSON" > "$OUT_FILE"
+  chmod 600 "$OUT_FILE"
 
-echo "access_key=$(mask_key "$ACCESS_KEY_ID")"
+  echo "service_specific_credential_id=$SERVICE_CREDENTIAL_ID"
+  echo "bearer_token=$(mask_secret "$BEARER_TOKEN")"
+  echo "bearer_token_days=$BEARER_TOKEN_DAYS"
+else
+  aws_operator iam create-access-key --user-name "$USER_NAME" > "$TMP_KEY_JSON"
+  ACCESS_KEY_ID=$(jq -r '.AccessKey.AccessKeyId' "$TMP_KEY_JSON")
+
+  umask 077
+  jq -r --arg region "$REGION" '
+    "export AWS_ACCESS_KEY_ID=" + .AccessKey.AccessKeyId,
+    "export AWS_SECRET_ACCESS_KEY=" + .AccessKey.SecretAccessKey,
+    "export AWS_REGION=" + $region,
+    "export AWS_DEFAULT_REGION=" + $region
+  ' "$TMP_KEY_JSON" > "$OUT_FILE"
+  chmod 600 "$OUT_FILE"
+
+  echo "access_key=$(mask_key "$ACCESS_KEY_ID")"
+fi
 echo "credentials_file=$OUT_FILE"
 
 if [[ "$VERIFY" -eq 1 ]]; then
@@ -331,63 +434,120 @@ if [[ "$VERIFY" -eq 1 ]]; then
     # shellcheck disable=SC1090
     source "$OUT_FILE"
     set +a
-    model_count=""
-    for attempt in $(seq 1 20); do
-      set +e
-      model_count=$(AWS_PAGER="" aws bedrock list-foundation-models --region "$REGION" --query 'length(modelSummaries)' --output text 2>/tmp/bedrock_key_verify_error.txt)
-      aws_status=$?
-      set -e
-      if [[ "$aws_status" -eq 0 ]]; then
-        break
-      fi
-      if [[ "$attempt" -eq 20 ]]; then
-        echo "bedrock_list_models=failed"
-        sed 's/^/  /' /tmp/bedrock_key_verify_error.txt
-        exit "$aws_status"
-      fi
-      sleep 3
-    done
-    echo "bedrock_model_count=$model_count"
-
-    if [[ "$VERIFY_INVOKE" -eq 1 ]]; then
-      jq -nc '{
-        anthropic_version: "bedrock-2023-05-31",
-        max_tokens: 4,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {type: "text", text: "Reply with ok."}
-            ]
+    if [[ "$CREDENTIAL_TYPE" == "bearer" ]]; then
+      echo "bedrock_model_count=skipped_for_bearer"
+      if [[ "$VERIFY_INVOKE" -eq 1 ]]; then
+        jq -nc '{
+          messages: [
+            {
+              role: "user",
+              content: [
+                {text: "Reply with ok."}
+              ]
+            }
+          ],
+          inferenceConfig: {
+            maxTokens: 4
           }
-        ]
-      }' > "$TMP_PAYLOAD_JSON"
-      if AWS_PAGER="" aws bedrock-runtime invoke-model \
-          --region "$REGION" \
-          --model-id "$VERIFY_MODEL_ID" \
-          --content-type application/json \
-          --accept application/json \
-          --body "fileb://$TMP_PAYLOAD_JSON" \
-          "$TMP_RESPONSE_JSON" >/dev/null 2>/tmp/bedrock_key_verify_error.txt; then
-        response_text=$(jq -r '.content[]? | select(.type=="text") | .text' "$TMP_RESPONSE_JSON" | head -n1)
-        echo "bedrock_invoke_model=$VERIFY_MODEL_ID"
-        echo "bedrock_invoke_response=${response_text:-ok}"
-      else
-        echo "bedrock_invoke=failed model=$VERIFY_MODEL_ID"
-        sed 's/^/  /' /tmp/bedrock_key_verify_error.txt
-        exit 4
-      fi
-    fi
+        }' > "$TMP_PAYLOAD_JSON"
+        encoded_model_id=$(python3 - "$VERIFY_MODEL_ID" <<'PY'
+import sys
+import urllib.parse
 
-    set +e
-    AWS_PAGER="" aws s3 ls >/tmp/bedrock_key_verify_error.txt 2>&1
-    s3_status=$?
-    set -e
-    if [[ "$s3_status" -eq 0 ]]; then
-      echo "s3=unexpected_allowed"
-      exit 3
+print(urllib.parse.quote(sys.argv[1], safe=""))
+PY
+)
+        http_code=""
+        curl_status=1
+        for attempt in $(seq 1 20); do
+          set +e
+          http_code=$(curl -sS \
+            -o "$TMP_RESPONSE_JSON" \
+            -w "%{http_code}" \
+            -X POST "https://bedrock-runtime.${REGION}.amazonaws.com/model/${encoded_model_id}/converse" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -H "Authorization: Bearer $AWS_BEARER_TOKEN_BEDROCK" \
+            --data-binary "@$TMP_PAYLOAD_JSON" \
+            2>/tmp/bedrock_key_verify_error.txt)
+          curl_status=$?
+          set -e
+          if [[ "$curl_status" -eq 0 && "$http_code" == 2* ]]; then
+            break
+          fi
+          if [[ "$attempt" -eq 20 ]]; then
+            echo "bedrock_converse=failed model=$VERIFY_MODEL_ID http_status=${http_code:-unknown}"
+            sed 's/^/  /' /tmp/bedrock_key_verify_error.txt
+            sed 's/^/  /' "$TMP_RESPONSE_JSON"
+            exit 4
+          fi
+          sleep 3
+        done
+        response_text=$(jq -r '.output.message.content[]? | select(.text) | .text' "$TMP_RESPONSE_JSON" | head -n1)
+        echo "bedrock_converse_model=$VERIFY_MODEL_ID"
+        echo "bedrock_converse_response=${response_text:-ok}"
+      fi
+
+      echo "s3=not_applicable_for_bearer"
     else
-      echo "s3=denied_ok"
+      model_count=""
+      for attempt in $(seq 1 20); do
+        set +e
+        model_count=$(AWS_PAGER="" aws bedrock list-foundation-models --region "$REGION" --query 'length(modelSummaries)' --output text 2>/tmp/bedrock_key_verify_error.txt)
+        aws_status=$?
+        set -e
+        if [[ "$aws_status" -eq 0 ]]; then
+          break
+        fi
+        if [[ "$attempt" -eq 20 ]]; then
+          echo "bedrock_list_models=failed"
+          sed 's/^/  /' /tmp/bedrock_key_verify_error.txt
+          exit "$aws_status"
+        fi
+        sleep 3
+      done
+      echo "bedrock_model_count=$model_count"
+
+      if [[ "$VERIFY_INVOKE" -eq 1 ]]; then
+        jq -nc '{
+          anthropic_version: "bedrock-2023-05-31",
+          max_tokens: 4,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {type: "text", text: "Reply with ok."}
+              ]
+            }
+          ]
+        }' > "$TMP_PAYLOAD_JSON"
+        if AWS_PAGER="" aws bedrock-runtime invoke-model \
+            --region "$REGION" \
+            --model-id "$VERIFY_MODEL_ID" \
+            --content-type application/json \
+            --accept application/json \
+            --body "fileb://$TMP_PAYLOAD_JSON" \
+            "$TMP_RESPONSE_JSON" >/dev/null 2>/tmp/bedrock_key_verify_error.txt; then
+          response_text=$(jq -r '.content[]? | select(.type=="text") | .text' "$TMP_RESPONSE_JSON" | head -n1)
+          echo "bedrock_invoke_model=$VERIFY_MODEL_ID"
+          echo "bedrock_invoke_response=${response_text:-ok}"
+        else
+          echo "bedrock_invoke=failed model=$VERIFY_MODEL_ID"
+          sed 's/^/  /' /tmp/bedrock_key_verify_error.txt
+          exit 4
+        fi
+      fi
+
+      set +e
+      AWS_PAGER="" aws s3 ls >/tmp/bedrock_key_verify_error.txt 2>&1
+      s3_status=$?
+      set -e
+      if [[ "$s3_status" -eq 0 ]]; then
+        echo "s3=unexpected_allowed"
+        exit 3
+      else
+        echo "s3=denied_ok"
+      fi
     fi
   )
 fi

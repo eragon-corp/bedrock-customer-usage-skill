@@ -1,6 +1,6 @@
 # Bedrock Customer Usage Skill
 
-Use this skill to manage customer-scoped AWS Bedrock access keys and check their
+Use this skill to manage customer-scoped AWS Bedrock credentials and check their
 usage from Codex.
 
 For the AWS-side setup and operating procedure, see [AWS_RUNBOOK.md](AWS_RUNBOOK.md).
@@ -8,12 +8,12 @@ For the AWS-side setup and operating procedure, see [AWS_RUNBOOK.md](AWS_RUNBOOK
 It helps you:
 
 - Check the customer Bedrock budget.
-- See customer IAM users and access keys.
+- See customer IAM users, access keys, and Bedrock bearer credentials.
 - Review recent Bedrock activity from CloudTrail.
 - Aggregate token counts from Bedrock invocation logs when a CloudWatch Logs
   destination is configured.
 - Show scoped Cost Explorer totals when a Billing View is configured.
-- Create a new Bedrock access key with customer and key-level tags.
+- Create a new Bedrock credential with customer and key-level tags.
 - Smoke-test the operator key end to end.
 - Disable a customer key without deleting the IAM user.
 
@@ -166,12 +166,44 @@ bedrock-customer-usage/scripts/create_bedrock_customer_key.sh \
 Use `--auto-customer` only for temporary keys. Production keys should use a
 stable `--customer` value so Cost Explorer groups are readable.
 
-The script creates one IAM user and one access key, saves the credentials to a
-local `0600` env file, and prints only a masked access key id.
+The script creates one IAM user and one credential, saves it to a local `0600`
+env file, and prints only a masked access key id or masked bearer token.
+
+By default, the script creates AWS access key credentials:
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=ap-southeast-1
+export AWS_DEFAULT_REGION=ap-southeast-1
+```
+
+To create a Bedrock bearer API key instead, use:
+
+```bash
+bedrock-customer-usage/scripts/create_bedrock_customer_key.sh \
+  --customer example-customer \
+  --key-alias prod \
+  --credential-type bearer \
+  --bearer-token-days 90 \
+  --output-dir ./secrets
+```
+
+That writes:
+
+```bash
+export AWS_BEARER_TOKEN_BEDROCK=...
+export AWS_REGION=ap-southeast-1
+export AWS_DEFAULT_REGION=ap-southeast-1
+```
+
+Bearer token verification may take a few seconds after creation while IAM
+propagates the new service-specific credential.
 
 By default, the script adds a small inline IAM policy that allows Bedrock model
-list/invoke/converse actions only. If your account requires managed policies or
-a permissions boundary, set these optional values in the config file:
+list/invoke/converse actions only. Bearer credentials also get
+`bedrock:CallWithBearerToken`. If your account requires managed policies or a
+permissions boundary, set these optional values in the config file:
 
 ```bash
 export BEDROCK_KEY_RUNTIME_POLICY_ARN=arn:aws:iam::123456789012:policy/BedrockCustomerRuntime
@@ -184,15 +216,28 @@ Run an operator smoke test:
 bedrock-customer-usage/scripts/smoke_bedrock_customer_operator.sh
 ```
 
-The smoke test creates a temporary customer user/key, verifies Bedrock list and
-invoke, disables and deletes the temporary access key, and then tries to clean up
-the temporary IAM user.
+The smoke test creates a temporary customer user/credential, verifies Bedrock
+access, disables and deletes the temporary credential, and then tries to clean up
+the temporary IAM user. To smoke-test bearer tokens:
+
+```bash
+bedrock-customer-usage/scripts/smoke_bedrock_customer_operator.sh \
+  --credential-type bearer \
+  --bearer-token-days 1
+```
 
 Disable a customer key:
 
 ```bash
 bedrock-customer-usage/scripts/disable_bedrock_customer_key.sh \
   --access-key-id AKIA...
+```
+
+Or disable a Bedrock bearer API key:
+
+```bash
+bedrock-customer-usage/scripts/disable_bedrock_customer_key.sh \
+  --service-credential-id ACCA...
 ```
 
 The disable script only acts on keys under the configured customer IAM path.
@@ -205,6 +250,12 @@ For clean cost reporting, keep this rule:
 one access key = one IAM user
 ```
 
+For bearer API keys, use the same attribution rule:
+
+```text
+one Bedrock bearer credential = one IAM user
+```
+
 Each created user is tagged with:
 
 - `customer`: customer-level reporting
@@ -214,15 +265,18 @@ Each created user is tagged with:
 AWS billing data is delayed. New tags may take time to appear in Cost Explorer
 before per-customer or per-key cost groups show up.
 
-CloudTrail can show activity by access key. Exact token-level or prompt-level
-usage by key requires Bedrock invocation logging and read access to the chosen
-log destination.
+CloudTrail can show activity by access key. For Bedrock bearer credentials, the
+script looks up CloudTrail activity by IAM user name and filters for Bedrock
+events. Exact token-level or prompt-level usage by key requires Bedrock
+invocation logging and read access to the chosen log destination.
 
 ## Safety
 
 Use a narrow operator key. It should manage only the intended customer IAM path
 and should query Cost Explorer only through a customer-scoped Billing View.
 
-Use IAM access keys for SDK, CLI, and server calls. Do not use
-`iam:CreateServiceSpecificCredential`; Bedrock uses normal IAM access key and
-secret key credentials.
+Use AWS access keys by default for SDK, CLI, and server calls. Use Bedrock bearer
+API keys only when the caller specifically needs `AWS_BEARER_TOKEN_BEDROCK`.
+Bearer API keys are IAM service-specific credentials for
+`bedrock.amazonaws.com`; keep them short-lived and scoped to the customer IAM
+path.

@@ -28,14 +28,16 @@ if [[ -n "$CONFIG_FILE" ]]; then
 fi
 
 ACCESS_KEY_ID=""
+SERVICE_CREDENTIAL_ID=""
 USER_NAME=""
 
 usage() {
   cat <<EOF
-Usage: $0 --access-key-id KEY_ID [--user-name USER_NAME]
+Usage: $0 (--access-key-id KEY_ID | --service-credential-id ID) [--user-name USER_NAME]
 
-Disables one access key only if it belongs to an IAM user under the configured
-customer path. This uses iam:UpdateAccessKey and does not delete the key or user.
+Disables one credential only if it belongs to an IAM user under the configured
+customer path. Access keys use iam:UpdateAccessKey. Bedrock bearer tokens use
+iam:UpdateServiceSpecificCredential. This does not delete the key or user.
 EOF
 }
 
@@ -43,6 +45,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --access-key-id)
       ACCESS_KEY_ID="$2"
+      shift 2
+      ;;
+    --service-credential-id|--service-specific-credential-id|--bearer-credential-id)
+      SERVICE_CREDENTIAL_ID="$2"
       shift 2
       ;;
     --user-name)
@@ -61,8 +67,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$ACCESS_KEY_ID" ]]; then
-  echo "--access-key-id is required" >&2
+if [[ -z "$ACCESS_KEY_ID" && -z "$SERVICE_CREDENTIAL_ID" ]]; then
+  echo "--access-key-id or --service-credential-id is required" >&2
+  usage >&2
+  exit 2
+fi
+
+if [[ -n "$ACCESS_KEY_ID" && -n "$SERVICE_CREDENTIAL_ID" ]]; then
+  echo "Use either --access-key-id or --service-credential-id, not both" >&2
   usage >&2
   exit 2
 fi
@@ -144,10 +156,57 @@ resolve_user_for_key() {
   exit 4
 }
 
-TARGET_USER=$(resolve_user_for_key)
-echo "disabling_key=$(mask_key "$ACCESS_KEY_ID") user=$TARGET_USER path=$CUSTOMER_PATH"
-aws_operator iam update-access-key \
-  --user-name "$TARGET_USER" \
-  --access-key-id "$ACCESS_KEY_ID" \
-  --status Inactive
+resolve_user_for_service_credential() {
+  local candidate_user credential_json user_json user_path
+
+  if [[ -n "$USER_NAME" ]]; then
+    user_json=$(aws_operator iam get-user --user-name "$USER_NAME" --output json)
+    user_path=$(printf '%s' "$user_json" | jq -r '.User.Path')
+    if [[ "$user_path" != "$CUSTOMER_PATH"* ]]; then
+      echo "refusing to disable service credential: user path is $user_path, expected prefix $CUSTOMER_PATH" >&2
+      exit 3
+    fi
+    credential_json=$(aws_operator iam list-service-specific-credentials \
+      --user-name "$USER_NAME" \
+      --service-name bedrock.amazonaws.com \
+      --output json)
+    if printf '%s' "$credential_json" | jq -e --arg id "$SERVICE_CREDENTIAL_ID" '.ServiceSpecificCredentials[]? | select(.ServiceSpecificCredentialId == $id)' >/dev/null; then
+      printf '%s' "$USER_NAME"
+      return 0
+    fi
+    echo "service credential $SERVICE_CREDENTIAL_ID was not found on user $USER_NAME" >&2
+    exit 4
+  fi
+
+  users_json=$(aws_operator iam list-users --path-prefix "$CUSTOMER_PATH" --output json)
+  while IFS= read -r candidate_user; do
+    credential_json=$(aws_operator iam list-service-specific-credentials \
+      --user-name "$candidate_user" \
+      --service-name bedrock.amazonaws.com \
+      --output json)
+    if printf '%s' "$credential_json" | jq -e --arg id "$SERVICE_CREDENTIAL_ID" '.ServiceSpecificCredentials[]? | select(.ServiceSpecificCredentialId == $id)' >/dev/null; then
+      printf '%s' "$candidate_user"
+      return 0
+    fi
+  done < <(printf '%s' "$users_json" | jq -r '.Users[]?.UserName')
+
+  echo "service credential $SERVICE_CREDENTIAL_ID was not found under path $CUSTOMER_PATH" >&2
+  exit 4
+}
+
+if [[ -n "$SERVICE_CREDENTIAL_ID" ]]; then
+  TARGET_USER=$(resolve_user_for_service_credential)
+  echo "disabling_service_credential=$SERVICE_CREDENTIAL_ID user=$TARGET_USER path=$CUSTOMER_PATH"
+  aws_operator iam update-service-specific-credential \
+    --user-name "$TARGET_USER" \
+    --service-specific-credential-id "$SERVICE_CREDENTIAL_ID" \
+    --status Inactive
+else
+  TARGET_USER=$(resolve_user_for_key)
+  echo "disabling_key=$(mask_key "$ACCESS_KEY_ID") user=$TARGET_USER path=$CUSTOMER_PATH"
+  aws_operator iam update-access-key \
+    --user-name "$TARGET_USER" \
+    --access-key-id "$ACCESS_KEY_ID" \
+    --status Inactive
+fi
 echo "done"
