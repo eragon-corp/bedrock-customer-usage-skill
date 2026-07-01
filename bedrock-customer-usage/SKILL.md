@@ -49,7 +49,7 @@ Never print full `AWS_SECRET_ACCESS_KEY` or `AWS_BEARER_TOKEN_BEDROCK` values. M
 Minimum create-key permissions for the default inline-policy path are:
 `iam:CreateUser`, `iam:TagUser`, `iam:PutUserPolicy`, `iam:CreateAccessKey`, `iam:UpdateAccessKey`, `iam:DeleteAccessKey`, `iam:GetUser`, `iam:ListUsers`, `iam:ListAccessKeys`, and `iam:ListUserTags`, scoped to the configured customer path.
 
-Bearer API key creation additionally needs `iam:CreateServiceSpecificCredential`, `iam:ListServiceSpecificCredentials`, `iam:UpdateServiceSpecificCredential`, and `iam:DeleteServiceSpecificCredential` scoped to the configured customer path. Creation should require `iam:ServiceSpecificCredentialServiceName=bedrock.amazonaws.com` and `iam:ServiceSpecificCredentialAgeDays <= 90`.
+Bearer API key creation additionally needs `iam:CreateServiceSpecificCredential`, `iam:ListServiceSpecificCredentials`, `iam:UpdateServiceSpecificCredential`, and `iam:DeleteServiceSpecificCredential` scoped to the configured customer path. Creation should require `iam:ServiceSpecificCredentialServiceName=bedrock.amazonaws.com` and `iam:ServiceSpecificCredentialAgeDays <= 365`.
 
 Usage checks need only the read-only services that are enabled in the account: Budget read, CloudTrail lookup, CloudWatch metric list/data, and Bedrock logging config. CloudWatch Logs token usage aggregation is optional and must be scoped to the Bedrock invocation log group. Raw prompt/response logs should not be printed.
 
@@ -157,7 +157,7 @@ By default, the script creates an AWS access key pair and uses `iam:PutUserPolic
 If a caller needs a Bedrock bearer API key, create it explicitly:
 
 ```bash
-bedrock-customer-usage/scripts/create_bedrock_customer_key.sh --customer example-customer --key-alias prod --credential-type bearer --bearer-token-days 90 --output-dir ./secrets
+bedrock-customer-usage/scripts/create_bedrock_customer_key.sh --customer example-customer --key-alias prod --credential-type bearer --bearer-token-days 365 --output-dir ./secrets
 ```
 
 This uses `iam:CreateServiceSpecificCredential` for `bedrock.amazonaws.com`, writes `AWS_BEARER_TOKEN_BEDROCK` to the local `0600` env file, and verifies with the Bedrock Converse API. The runtime policy must include `bedrock:CallWithBearerToken`.

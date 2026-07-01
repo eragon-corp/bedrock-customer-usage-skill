@@ -62,7 +62,7 @@ Credentials:
 Optional environment:
   BEDROCK_KEY_REGION
   BEDROCK_KEY_CREDENTIAL_TYPE          default: access-key
-  BEDROCK_KEY_BEARER_TOKEN_DAYS        default: 90, max: 90
+  BEDROCK_KEY_BEARER_TOKEN_DAYS        default: 90, max: 365
   BEDROCK_KEY_CREATED_BY
   BEDROCK_KEY_RUNTIME_POLICY_JSON      path to a custom inline policy JSON file
   BEDROCK_KEY_INLINE_POLICY_NAME       default: BedrockCustomerRuntime
@@ -165,8 +165,8 @@ if [[ "$CREDENTIAL_TYPE" == "bearer" ]]; then
     echo "--bearer-token-days must be an integer" >&2
     exit 2
   fi
-  if (( BEARER_TOKEN_DAYS < 1 || BEARER_TOKEN_DAYS > 90 )); then
-    echo "--bearer-token-days must be between 1 and 90" >&2
+  if (( BEARER_TOKEN_DAYS < 1 || BEARER_TOKEN_DAYS > 365 )); then
+    echo "--bearer-token-days must be between 1 and 365" >&2
     exit 2
   fi
 fi

@@ -97,7 +97,7 @@ Example operator policy:
           "iam:ServiceSpecificCredentialServiceName": "bedrock.amazonaws.com"
         },
         "NumericLessThanEquals": {
-          "iam:ServiceSpecificCredentialAgeDays": "90"
+          "iam:ServiceSpecificCredentialAgeDays": "365"
         },
         "Null": {
           "iam:ServiceSpecificCredentialAgeDays": "false"
@@ -263,7 +263,7 @@ export BEDROCK_KEY_REGION=ap-southeast-1
 export BEDROCK_KEY_VERIFY_MODEL_ID=anthropic.claude-3-haiku-20240307-v1:0
 # Optional; default is access-key.
 # export BEDROCK_KEY_CREDENTIAL_TYPE=access-key
-# export BEDROCK_KEY_BEARER_TOKEN_DAYS=90
+# export BEDROCK_KEY_BEARER_TOKEN_DAYS=365
 ```
 
 Put the operator credential in a private env file outside the repo:
@@ -366,7 +366,7 @@ bedrock-customer-usage/scripts/create_bedrock_customer_key.sh \
   --customer example-customer \
   --key-alias prod \
   --credential-type bearer \
-  --bearer-token-days 90 \
+  --bearer-token-days 365 \
   --output-dir ./secrets
 ```
 
@@ -381,7 +381,7 @@ export AWS_DEFAULT_REGION=ap-southeast-1
 Bearer API keys are IAM service-specific credentials for
 `bedrock.amazonaws.com`. The customer runtime policy must allow
 `bedrock:CallWithBearerToken`, and the operator create permission should require
-`iam:ServiceSpecificCredentialAgeDays <= 90`.
+`iam:ServiceSpecificCredentialAgeDays <= 365`.
 
 ## Verify a Customer Key Manually
 
@@ -739,7 +739,7 @@ visibility risk is explicitly accepted.
 
 Use this action only for Bedrock bearer API keys. Check that the operator is
 creating credentials for `bedrock.amazonaws.com`, that
-`CredentialAgeDays` is present and no more than 90, and that the target IAM user
+`CredentialAgeDays` is present and no more than 365, and that the target IAM user
 is under the configured customer path with the required tags.
 
 Model list succeeds but model invoke fails:

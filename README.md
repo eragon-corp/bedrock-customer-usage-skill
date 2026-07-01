@@ -185,7 +185,7 @@ bedrock-customer-usage/scripts/create_bedrock_customer_key.sh \
   --customer example-customer \
   --key-alias prod \
   --credential-type bearer \
-  --bearer-token-days 90 \
+  --bearer-token-days 365 \
   --output-dir ./secrets
 ```
 
@@ -198,7 +198,8 @@ export AWS_DEFAULT_REGION=ap-southeast-1
 ```
 
 Bearer token verification may take a few seconds after creation while IAM
-propagates the new service-specific credential.
+propagates the new service-specific credential. The default bearer token
+duration is 90 days; the configured maximum is 365 days.
 
 By default, the script adds a small inline IAM policy that allows Bedrock model
 list/invoke/converse actions only. Bearer credentials also get
