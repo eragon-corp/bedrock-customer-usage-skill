@@ -265,12 +265,26 @@ bedrock-customer-usage/scripts/create_bedrock_customer_key.sh \
   --output-dir ./secrets
 ```
 
+For a temporary test key, generate a customer tag automatically:
+
+```bash
+bedrock-customer-usage/scripts/create_bedrock_customer_key.sh \
+  --auto-customer \
+  --key-alias test \
+  --output-dir ./secrets
+```
+
+Use `--auto-customer` only for smoke tests or temporary keys. Production keys
+should use a stable `--customer` value so customer and per-key cost groups remain
+readable in Cost Explorer.
+
 The script creates:
 
 - One IAM user under the configured path
 - One inline Bedrock runtime policy
 - One access key pair
 - One local `0600` env file with the customer credential
+- Tags for both FRAI/customer grouping and per-key grouping
 
 The customer receives:
 

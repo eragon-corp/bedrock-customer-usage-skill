@@ -132,6 +132,18 @@ bedrock-customer-usage/scripts/create_bedrock_customer_key.sh \
   --output-dir ./secrets
 ```
 
+For a temporary test key, the script can generate a customer tag:
+
+```bash
+bedrock-customer-usage/scripts/create_bedrock_customer_key.sh \
+  --auto-customer \
+  --key-alias test \
+  --output-dir ./secrets
+```
+
+Use `--auto-customer` only for temporary keys. Production keys should use a
+stable `--customer` value so Cost Explorer groups are readable.
+
 The script creates one IAM user and one access key, saves the credentials to a
 local `0600` env file, and prints only a masked access key id.
 
@@ -175,6 +187,7 @@ Each created user is tagged with:
 
 - `customer`: customer-level reporting
 - `usageOwner`: key-level reporting
+- `keyAlias`: human-readable key label
 
 AWS billing data is delayed. New tags may take time to appear in Cost Explorer
 before per-customer or per-key cost groups show up.

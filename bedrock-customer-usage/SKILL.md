@@ -119,6 +119,14 @@ Use the create-key script when asked to provision a new Bedrock customer API key
 bedrock-customer-usage/scripts/create_bedrock_customer_key.sh --customer example-customer --key-alias prod --output-dir ./secrets
 ```
 
+For temporary tests only, `--auto-customer` may be used:
+
+```bash
+bedrock-customer-usage/scripts/create_bedrock_customer_key.sh --auto-customer --key-alias test --output-dir ./secrets
+```
+
+Prefer an explicit stable `--customer` for production keys. Auto-generated customer names make Cost Explorer groups harder to read.
+
 Shared path, policy, budget, and Billing View settings should come from the local config file. For daily use, provide only credentials and the customer arguments:
 
 ```bash

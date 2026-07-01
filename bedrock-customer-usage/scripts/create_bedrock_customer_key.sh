@@ -28,6 +28,7 @@ if [[ -n "$CONFIG_FILE" ]]; then
 fi
 
 CUSTOMER=""
+AUTO_CUSTOMER=0
 KEY_ALIAS="default"
 USER_NAME=""
 USAGE_OWNER=""
@@ -38,10 +39,13 @@ VERIFY_MODEL_ID="${BEDROCK_KEY_VERIFY_MODEL_ID:-anthropic.claude-3-haiku-2024030
 
 usage() {
   cat <<EOF
-Usage: $0 --customer NAME [--key-alias NAME] [--usage-owner VALUE] [--user-name NAME] [--output-dir DIR] [--verify-model MODEL_ID] [--no-verify] [--no-verify-invoke]
+Usage: $0 (--customer NAME | --auto-customer) [--key-alias NAME] [--usage-owner VALUE] [--user-name NAME] [--output-dir DIR] [--verify-model MODEL_ID] [--no-verify] [--no-verify-invoke]
 
 Creates one IAM user and one Bedrock access key, with tags for future customer
 and per-key cost attribution.
+
+Use --auto-customer only for test or temporary keys. Production customer keys
+should pass a stable --customer value for readable cost attribution.
 
 Shared config:
   Auto-loads ./bedrock-customer-usage.env,
@@ -68,6 +72,10 @@ while [[ $# -gt 0 ]]; do
     --customer)
       CUSTOMER="$2"
       shift 2
+      ;;
+    --auto-customer)
+      AUTO_CUSTOMER=1
+      shift
       ;;
     --key-alias)
       KEY_ALIAS="$2"
@@ -109,8 +117,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$CUSTOMER" ]]; then
-  echo "--customer is required" >&2
+if [[ "$AUTO_CUSTOMER" -eq 1 && -n "$CUSTOMER" ]]; then
+  echo "Use either --customer or --auto-customer, not both" >&2
+  usage >&2
+  exit 2
+fi
+
+if [[ -z "$CUSTOMER" && "$AUTO_CUSTOMER" -ne 1 ]]; then
+  echo "--customer is required unless --auto-customer is set" >&2
   usage >&2
   exit 2
 fi
@@ -176,10 +190,21 @@ aws_operator() {
   fi
 }
 
-CUSTOMER_SLUG=$(slugify "$CUSTOMER")
-ALIAS_SLUG=$(slugify "$KEY_ALIAS")
 TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 CREATED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+ALIAS_SLUG=$(slugify "$KEY_ALIAS")
+
+if [[ -z "$CUSTOMER" ]]; then
+  if [[ "$AUTO_CUSTOMER" -eq 1 ]]; then
+    CUSTOMER="customer-$TIMESTAMP"
+  else
+    echo "--customer is required unless --auto-customer is set" >&2
+    usage >&2
+    exit 2
+  fi
+fi
+
+CUSTOMER_SLUG=$(slugify "$CUSTOMER")
 
 if [[ -z "$USAGE_OWNER" ]]; then
   USAGE_OWNER="${CUSTOMER_SLUG}-${ALIAS_SLUG}-${TIMESTAMP}"
@@ -248,6 +273,9 @@ fi
 
 echo "creating_user=$USER_NAME"
 echo "path=$CUSTOMER_PATH"
+if [[ "$AUTO_CUSTOMER" -eq 1 ]]; then
+  echo "auto_customer=true"
+fi
 echo "customer=$CUSTOMER_SLUG key_alias=$ALIAS_SLUG usage_owner=$USAGE_OWNER"
 
 create_user_args=(iam create-user --user-name "$USER_NAME" --path "$CUSTOMER_PATH")
